@@ -1,0 +1,48 @@
+{% extends 'dfe/base.html' %}
+{% block title %}NFC-e {{ doc.chave_acesso }}{% endblock %}
+{% block content %}
+<a href="{% url 'dfe:consulta_empresa' doc.empresa.id %}" style="color:#2563eb; text-decoration:none;">← Voltar</a>
+
+<h1 style="margin-top:8px;">Documento {{ doc.get_tipo_documento_display }}</h1>
+
+<div class="card" style="margin-bottom:16px;">
+    <div><strong>Empresa:</strong> {{ doc.empresa.razao_social }} ({{ doc.empresa.cnpj }})</div>
+    <div><strong>Chave:</strong> <span style="font-family:monospace;">{{ doc.chave_acesso }}</span></div>
+    <div><strong>NSU:</strong> {{ doc.nsu }}</div>
+    {% if resumo.numero %}<div><strong>Nº/Série:</strong> {{ resumo.numero }}/{{ resumo.serie }}</div>{% endif %}
+    {% if resumo.emitido_em %}<div><strong>Emissão:</strong> {{ resumo.emitido_em }}</div>{% endif %}
+    {% if resumo.valor %}<div><strong>Valor:</strong> R$ {{ resumo.valor }}</div>{% endif %}
+    <div><strong>Status:</strong>
+        {% if doc.cancelada %}<span class="badge badge-err">Cancelada</span>
+        {% else %}<span class="badge badge-ok">Vigente</span>{% endif %}
+    </div>
+    <div><strong>Capturado em:</strong> {{ doc.capturado_em|date:"d/m/Y H:i" }}</div>
+    <div style="margin-top:12px;">
+        <a class="btn btn-primary btn-sm" href="{% url 'dfe:consulta_documento_xml' doc.id %}">Baixar XML da NFC-e</a>
+        {% if evento %}
+        <a class="btn btn-secondary btn-sm" href="{% url 'dfe:consulta_documento_xml' evento.id %}">Baixar XML do evento</a>
+        {% endif %}
+    </div>
+</div>
+
+{% if evento %}
+<div class="card" style="margin-bottom:16px; border-left:4px solid #b91c1c;">
+    <h2 style="margin-top:0;">Evento de Cancelamento</h2>
+    <div><strong>NSU do evento:</strong> {{ evento.nsu }}</div>
+    {% if evento_resumo.tp_evento %}<div><strong>tpEvento:</strong> {{ evento_resumo.tp_evento }}</div>{% endif %}
+    {% if evento_resumo.n_seq_evento %}<div><strong>nSeqEvento:</strong> {{ evento_resumo.n_seq_evento }}</div>{% endif %}
+    {% if evento_resumo.cstat %}<div><strong>cStat:</strong> {{ evento_resumo.cstat }} — {{ evento_resumo.xmotivo }}</div>{% endif %}
+    {% if evento_resumo.dh_reg_evento %}<div><strong>Registrado em:</strong> {{ evento_resumo.dh_reg_evento }}</div>{% endif %}
+    {% if evento_resumo.n_prot %}<div><strong>Protocolo:</strong> {{ evento_resumo.n_prot }}</div>{% endif %}
+    {% if evento_resumo.ver_aplic %}<div><strong>verAplic:</strong> {{ evento_resumo.ver_aplic }}</div>{% endif %}
+</div>
+{% endif %}
+
+<h2>XML da NFC-e</h2>
+<pre class="xml">{{ doc.xml }}</pre>
+
+{% if evento %}
+<h2 style="margin-top:24px;">XML do evento de cancelamento</h2>
+<pre class="xml">{{ evento.xml }}</pre>
+{% endif %}
+{% endblock %}

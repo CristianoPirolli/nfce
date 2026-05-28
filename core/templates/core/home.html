@@ -2,10 +2,52 @@
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <title>NFCE</title>
+    <title>NFC-e — Início</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #f5f6f8; margin: 0; color: #111827; }
+        header { background: #1f2937; color: #fff; padding: 16px 32px; }
+        main { max-width: 960px; margin: 40px auto; padding: 0 24px; }
+        h1 { margin-top: 0; }
+        p.lead { color: #6b7280; margin-bottom: 32px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+        .card {
+            background: #fff; padding: 20px 24px; border-radius: 10px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.05); text-decoration: none; color: inherit;
+            display: block; transition: transform .08s ease, box-shadow .08s ease;
+            border: 1px solid #e5e7eb;
+        }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+        .card h2 { margin: 0 0 6px; font-size: 18px; }
+        .card p { margin: 0; color: #6b7280; font-size: 14px; }
+        .tag { display:inline-block; background:#eef2ff; color:#3730a3; padding:2px 8px; border-radius:999px; font-size:11px; margin-bottom:8px; }
+        .tag.admin { background:#fef3c7; color:#92400e; }
+    </style>
 </head>
 <body>
-    <h1>Sistema NFCE</h1>
-    <p>Projeto Django estruturado em MVC.</p>
+<header><strong>NFC-e</strong></header>
+<main>
+    <h1>Sistema NFC-e</h1>
+    <p class="lead">Selecione uma área para começar.</p>
+
+    <div class="grid">
+        <a class="card" href="{% url 'dfe:consulta_index' %}">
+            <span class="tag">Operação</span>
+            <h2>Consulta de NFC-e</h2>
+            <p>Visualize, filtre e baixe XML das NFC-e capturadas e dispare novas capturas SEF-SC.</p>
+        </a>
+
+        <a class="card" href="{% url 'dfe:lista_empresas' %}">
+            <span class="tag">Cadastro</span>
+            <h2>Certificados por empresa</h2>
+            <p>Cadastre empresas e envie os certificados digitais A1 (.pfx) usados nas consultas SEF-SC.</p>
+        </a>
+
+        <a class="card" href="/admin/">
+            <span class="tag admin">Admin</span>
+            <h2>Painel Django</h2>
+            <p>Gerencie empresas, configurações DFe, estado de sincronização e documentos capturados.</p>
+        </a>
+    </div>
+</main>
 </body>
 </html>

@@ -1,0 +1,157 @@
+{% extends 'dfe/base.html' %}
+{% block title %}{{ empresa.razao_social }} — NFC-e{% endblock %}
+{% block content %}
+
+<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:16px;">
+    <div>
+        <h1 style="margin-bottom:4px;">{{ empresa.razao_social }}</h1>
+        <div style="color:#6b7280;">CNPJ {{ empresa.cnpj }}</div>
+        {% if state %}
+            <div style="margin-top:8px; font-size:13px;">
+                NSU atual: <strong>{{ state.ultimo_nsu_sc }}</strong> ·
+                Última captura: {{ state.ultima_captura|default:"—" }} ·
+                cStat: <span class="badge badge-info">{{ state.ultimo_cstat|default:"—" }}</span>
+                {% if state.ultimo_motivo %} <span style="color:#6b7280;">— {{ state.ultimo_motivo }}</span>{% endif %}
+            </div>
+        {% endif %}
+    </div>
+    <form method="post" action="{% url 'dfe:consulta_capturar' empresa.id %}">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-primary"
+                {% if not empresa.cert_pfx %}disabled title="Cadastre o certificado primeiro"{% endif %}>
+            ⟳ Capturar agora
+        </button>
+    </form>
+</div>
+
+{% if ultima_captura %}
+<div class="card" style="margin-bottom:16px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <strong>Última captura</strong>
+        <span style="color:#6b7280; font-size:13px;">
+            {{ ultima_captura.lotes|length }} lote(s) ·
+            {{ ultima_captura.qt_dfe_ret }} documento(s) ·
+            NSU {{ ultima_captura.nsu_inicial }} → {{ ultima_captura.ult_nsu }} ·
+            parou por <code>{{ ultima_captura.parou_por }}</code>
+        </span>
+    </div>
+    <table style="margin-top:12px;">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>cStat</th>
+                <th>Motivo</th>
+                <th>NSU antes</th>
+                <th>NSU depois</th>
+                <th>Docs retornados</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for l in ultima_captura.lotes %}
+            <tr>
+                <td>{{ l.iteracao }}</td>
+                <td><span class="badge {% if l.cstat == '118' %}badge-ok{% elif l.cstat == '657' %}badge-err{% else %}badge-info{% endif %}">{{ l.cstat }}</span></td>
+                <td>{{ l.xmotivo }}</td>
+                <td>{{ l.nsu_antes }}</td>
+                <td>{{ l.nsu_depois }}</td>
+                <td>{{ l.qt_dfe_ret }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<form method="get" class="card filters">
+    <div>
+        <label>Início</label>
+        <input type="date" name="inicio" value="{{ filtros.inicio }}">
+    </div>
+    <div>
+        <label>Fim</label>
+        <input type="date" name="fim" value="{{ filtros.fim }}">
+    </div>
+    <div>
+        <label>Tipo</label>
+        <select name="tipo">
+            <option value="">Todos</option>
+            {% for v, l in tipos %}
+                <option value="{{ v }}" {% if filtros.tipo == v %}selected{% endif %}>{{ l }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label>Cancelada</label>
+        <select name="cancelada">
+            <option value="">Todas</option>
+            <option value="sim" {% if filtros.cancelada == 'sim' %}selected{% endif %}>Sim</option>
+            <option value="nao" {% if filtros.cancelada == 'nao' %}selected{% endif %}>Não</option>
+        </select>
+    </div>
+    <div style="flex:1;">
+        <label>Chave de acesso</label>
+        <input type="text" name="chave" value="{{ filtros.chave }}" placeholder="44 dígitos ou parte">
+    </div>
+    <button type="submit" class="btn btn-primary">Filtrar</button>
+    <a href="{% url 'dfe:consulta_empresa' empresa.id %}" class="btn btn-secondary">Limpar</a>
+</form>
+
+<div style="margin:12px 0; color:#6b7280; font-size:13px;">
+    {{ page.paginator.count }} documento(s) encontrado(s).
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>NSU</th>
+            <th>Tipo</th>
+            <th>Nº/Série</th>
+            <th>Emissão</th>
+            <th>Valor</th>
+            <th>Chave</th>
+            <th>Status</th>
+            <th>Capturado em</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for linha in linhas %}
+        <tr>
+            <td>{{ linha.doc.nsu }}</td>
+            <td><span class="badge badge-info">{{ linha.doc.get_tipo_documento_display }}</span></td>
+            <td>{{ linha.resumo.numero }}{% if linha.resumo.serie %}/{{ linha.resumo.serie }}{% endif %}</td>
+            <td>{{ linha.resumo.emitido_em }}</td>
+            <td>{% if linha.resumo.valor %}R$ {{ linha.resumo.valor }}{% endif %}</td>
+            <td style="font-family:monospace; font-size:12px;">{{ linha.doc.chave_acesso }}</td>
+            <td>
+                {% if linha.doc.cancelada %}
+                    <span class="badge badge-err">Cancelada</span>
+                {% else %}
+                    <span class="badge badge-ok">Vigente</span>
+                {% endif %}
+            </td>
+            <td>{{ linha.doc.capturado_em|date:"d/m/Y H:i" }}</td>
+            <td class="actions">
+                <a class="btn btn-secondary btn-sm" href="{% url 'dfe:consulta_documento' linha.doc.id %}">Ver</a>
+                <a class="btn btn-secondary btn-sm" href="{% url 'dfe:consulta_documento_xml' linha.doc.id %}">XML</a>
+            </td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="9" style="text-align:center; padding:24px;">Nenhum documento encontrado.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if page.has_other_pages %}
+<div class="pagination">
+    {% if page.has_previous %}
+        <a class="btn btn-secondary btn-sm" href="?page={{ page.previous_page_number }}&tipo={{ filtros.tipo }}&cancelada={{ filtros.cancelada }}&chave={{ filtros.chave }}&inicio={{ filtros.inicio }}&fim={{ filtros.fim }}">‹ Anterior</a>
+    {% endif %}
+    <span>Página {{ page.number }} de {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}
+        <a class="btn btn-secondary btn-sm" href="?page={{ page.next_page_number }}&tipo={{ filtros.tipo }}&cancelada={{ filtros.cancelada }}&chave={{ filtros.chave }}&inicio={{ filtros.inicio }}&fim={{ filtros.fim }}">Próxima ›</a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% endblock %}

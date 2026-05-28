@@ -1,0 +1,35 @@
+{% extends 'dfe/base.html' %}
+{% block title %}Consulta NFC-e{% endblock %}
+{% block content %}
+<h1>Consulta de NFC-e</h1>
+<p style="color:#6b7280;">Selecione uma empresa para visualizar e capturar documentos.</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>Razão social</th>
+            <th>CNPJ</th>
+            <th>Certificado</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for empresa in empresas %}
+        <tr>
+            <td>{{ empresa.razao_social }}</td>
+            <td>{{ empresa.cnpj }}</td>
+            <td>
+                {% if empresa.cert_pfx %}
+                    <span class="badge badge-ok">OK</span>
+                {% else %}
+                    <span class="badge badge-warn">Pendente</span>
+                {% endif %}
+            </td>
+            <td><a class="btn btn-primary btn-sm" href="{% url 'dfe:consulta_empresa' empresa.id %}">Abrir</a></td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="4" style="text-align:center; padding:24px;">Nenhuma empresa ativa.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

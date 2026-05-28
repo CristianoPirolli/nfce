@@ -1,10 +1,59 @@
+from cryptography.fernet import Fernet, InvalidToken
+from django.conf import settings
+from django.core.files.storage import FileSystemStorage
 from django.db import models
+
+
+def empresa_cert_upload_path(instance, filename):
+    return f'empresa_{instance.cnpj}/{filename}'
+
+
+private_cert_storage = FileSystemStorage(location=str(settings.PRIVATE_CERTS_ROOT))
+
+
+def _fernet() -> Fernet:
+    key = settings.CERT_SECRET_KEY
+    if isinstance(key, str):
+        key = key.encode('utf-8')
+    return Fernet(key)
 
 
 class Empresa(models.Model):
     razao_social = models.CharField(max_length=255)
     cnpj = models.CharField(max_length=14, unique=True)
     ativa = models.BooleanField(default=True)
+
+    cert_pfx = models.FileField(
+        upload_to=empresa_cert_upload_path,
+        storage=private_cert_storage,
+        blank=True,
+        null=True,
+        help_text='Certificado digital A1 (.pfx) da própria empresa (e-CNPJ). '
+                  'Armazenado em diretório privado, não exposto via HTTP.'
+    )
+    cert_password_encrypted = models.BinaryField(blank=True, null=True)
+    cert_cnpj_titular = models.CharField(
+        max_length=14,
+        blank=True,
+        default='',
+        help_text='CNPJ extraído do certificado no momento do upload.'
+    )
+    cert_validade = models.DateTimeField(null=True, blank=True)
+    ver_aplic = models.CharField(max_length=20, default='NFCE-DJANGO-1.0')
+
+    def set_cert_password(self, plaintext: str) -> None:
+        if not plaintext:
+            self.cert_password_encrypted = None
+            return
+        self.cert_password_encrypted = _fernet().encrypt(plaintext.encode('utf-8'))
+
+    def get_cert_password(self) -> str:
+        if not self.cert_password_encrypted:
+            return ''
+        try:
+            return _fernet().decrypt(bytes(self.cert_password_encrypted)).decode('utf-8')
+        except InvalidToken:
+            raise ValueError('Senha do certificado não pôde ser decriptada (chave incorreta).')
 
     def __str__(self):
         return f'{self.razao_social} - {self.cnpj}'
@@ -60,6 +109,7 @@ class NfceDocumento(models.Model):
     )
 
     xml = models.TextField()
+    emitido_em = models.DateTimeField(null=True, blank=True, db_index=True)
     cancelada = models.BooleanField(default=False)
     cancelamento_verificado_em = models.DateTimeField(null=True, blank=True)
     capturado_em = models.DateTimeField(auto_now_add=True)

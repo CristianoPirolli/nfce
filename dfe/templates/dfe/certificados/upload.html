@@ -1,0 +1,28 @@
+{% extends 'dfe/base.html' %}
+{% block title %}Certificado — {{ empresa.razao_social }}{% endblock %}
+{% block content %}
+<h1>Certificado de {{ empresa.razao_social }}</h1>
+<p style="color:#6b7280;">CNPJ: {{ empresa.cnpj }}</p>
+
+{% if empresa.cert_pfx %}
+<div class="card" style="margin-bottom:16px;">
+    <strong>Certificado atual:</strong> {{ empresa.cert_pfx.name }}<br>
+    <small>Titular: {{ empresa.cert_cnpj_titular|default:"—" }} · Válido até: {{ empresa.cert_validade|default:"—" }}</small>
+</div>
+{% endif %}
+
+<div class="card" style="max-width:520px;">
+    <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <p style="color:#6b7280; font-size:13px;">
+            O certificado deve ser do tipo A1 (.pfx) e o CNPJ do titular precisa coincidir com o CNPJ da empresa
+            ({{ empresa.cnpj }}).
+        </p>
+        <div class="actions">
+            <button type="submit" class="btn btn-primary">Enviar certificado</button>
+            <a href="{% url 'dfe:lista_empresas' %}" class="btn btn-secondary">Cancelar</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

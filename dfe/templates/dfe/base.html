@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>{% block title %}NFC-e{% endblock %}</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #f5f6f8; margin: 0; color: #111827; }
+        header { background: #1f2937; color: #fff; padding: 16px 32px; }
+        header a { color: #fff; text-decoration: none; margin-right: 16px; opacity: .85; }
+        header a:hover { opacity: 1; }
+        main { max-width: 1100px; margin: 24px auto; padding: 0 24px; }
+        h1 { margin-top: 0; }
+        table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; font-size: 14px; }
+        th { background: #f9fafb; font-size: 12px; text-transform: uppercase; color: #374151; }
+        .btn { display: inline-block; padding: 8px 14px; border-radius: 6px; text-decoration: none; font-size: 14px; border: 0; cursor: pointer; }
+        .btn-primary { background: #2563eb; color: #fff; }
+        .btn-secondary { background: #e5e7eb; color: #111827; }
+        .btn-danger { background: #b91c1c; color: #fff; }
+        .btn-sm { padding: 4px 10px; font-size: 12px; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+        .badge-ok { background: #dcfce7; color: #166534; }
+        .badge-warn { background: #fef3c7; color: #92400e; }
+        .badge-err { background: #fee2e2; color: #991b1b; }
+        .badge-info { background: #dbeafe; color: #1e40af; }
+        .messages { list-style: none; padding: 0; }
+        .messages li { padding: 10px 14px; border-radius: 6px; margin-bottom: 8px; }
+        .messages li.success { background: #dcfce7; color: #166534; }
+        .messages li.error { background: #fee2e2; color: #991b1b; }
+        form p { margin: 12px 0; display: flex; flex-direction: column; }
+        form label { font-size: 13px; color: #374151; margin-bottom: 4px; }
+        form input[type=text], form input[type=password], form input[type=file], form input[type=date], form select {
+            padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px;
+        }
+        .card { background: #fff; padding: 20px 24px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+        .actions { display: flex; gap: 8px; align-items: center; }
+        .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 16px; }
+        .filters > div { display: flex; flex-direction: column; }
+        .filters label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+        .pagination { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+        pre.xml { background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow: auto; max-height: 600px; font-size: 12px; }
+    </style>
+</head>
+<body>
+<header>
+    <strong style="margin-right:24px;">NFC-e</strong>
+    <a href="/">Início</a>
+    <a href="{% url 'dfe:consulta_index' %}">Consulta</a>
+    <a href="{% url 'dfe:lista_empresas' %}">Certificados</a>
+    <a href="/admin/">Admin</a>
+</header>
+<main>
+    {% if messages %}
+    <ul class="messages">
+        {% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

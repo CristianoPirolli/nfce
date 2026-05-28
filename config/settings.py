@@ -118,3 +118,23 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Certificados ficam fora do MEDIA_ROOT e NÃO são servidos pelo Django.
+# Acesso só via FileSystemStorage interno em dfe.models.
+PRIVATE_CERTS_ROOT = BASE_DIR / 'private_certs'
+
+# Chave Fernet para criptografia das senhas de certificado.
+# Obrigatória via variável de ambiente fora de DEBUG.
+import os
+from django.core.exceptions import ImproperlyConfigured
+
+CERT_SECRET_KEY = os.environ.get('CERT_SECRET_KEY')
+if not CERT_SECRET_KEY:
+    if DEBUG:
+        # Chave de DEV apenas — nunca usar fora do localhost.
+        CERT_SECRET_KEY = '2KtOmNxqtpEmtc3Eu39cC8-UQ35hzkCO_cMzGOc-yKM='
+    else:
+        raise ImproperlyConfigured(
+            'CERT_SECRET_KEY não definida. Configure a variável de ambiente '
+            'com uma chave Fernet de 32 bytes url-safe base64.'
+        )

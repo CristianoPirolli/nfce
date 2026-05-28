@@ -1,0 +1,52 @@
+{% extends 'dfe/base.html' %}
+{% block title %}Certificados — NFC-e{% endblock %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+    <h1>Certificados por empresa</h1>
+    <a href="{% url 'dfe:nova_empresa' %}" class="btn btn-primary">+ Nova empresa</a>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Razão social</th>
+            <th>CNPJ</th>
+            <th>Certificado</th>
+            <th>Validade</th>
+            <th>Titular</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for empresa in empresas %}
+        <tr>
+            <td>{{ empresa.razao_social }}</td>
+            <td>{{ empresa.cnpj }}</td>
+            <td>
+                {% if empresa.cert_pfx %}
+                    <span class="badge badge-ok">Cadastrado</span>
+                {% else %}
+                    <span class="badge badge-warn">Pendente</span>
+                {% endif %}
+            </td>
+            <td>{{ empresa.cert_validade|default:"—" }}</td>
+            <td>{{ empresa.cert_cnpj_titular|default:"—" }}</td>
+            <td class="actions">
+                <a class="btn btn-secondary" href="{% url 'dfe:upload_certificado' empresa.id %}">
+                    {% if empresa.cert_pfx %}Substituir{% else %}Enviar{% endif %}
+                </a>
+                {% if empresa.cert_pfx %}
+                <form method="post" action="{% url 'dfe:remover_certificado' empresa.id %}"
+                      onsubmit="return confirm('Remover o certificado desta empresa?');">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-danger">Remover</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="6" style="text-align:center; padding:24px;">Nenhuma empresa cadastrada.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

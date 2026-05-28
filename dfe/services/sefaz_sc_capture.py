@@ -1,8 +1,35 @@
 import base64
 import gzip
+from datetime import datetime
 from io import BytesIO
 from lxml import etree
 from django.utils import timezone
+
+_SAFE_XML_PARSER = etree.XMLParser(
+    resolve_entities=False,
+    no_network=True,
+    huge_tree=False,
+    load_dtd=False,
+)
+
+
+def _safe_fromstring(data):
+    return etree.fromstring(data, parser=_SAFE_XML_PARSER)
+
+
+def _extrair_dh_emi(xml_str: str):
+    """Lê <dhEmi> do XML e devolve datetime aware (ou None)."""
+    try:
+        root = _safe_fromstring(xml_str.encode('utf-8'))
+    except Exception:
+        return None
+    el = root.find('.//{*}dhEmi')
+    if el is None or not el.text:
+        return None
+    try:
+        return datetime.fromisoformat(el.text)
+    except ValueError:
+        return None
 
 from dfe.models import Empresa, DfeSetting, DfeSyncState, NfceDocumento
 from dfe.services.sefaz_sc_distribuicao_client import (
@@ -22,72 +49,136 @@ def descompactar_lote(lote_dist_comp: str) -> bytes:
     return gzip.GzipFile(fileobj=BytesIO(raw)).read()
 
 
-def capturar_sc_para_cnpj(cnpj: str):
-    empresa = Empresa.objects.get(cnpj=cnpj)
+def _resolver_cert(empresa: Empresa):
+    """Retorna (cert_path, cert_password, ver_aplic) priorizando o cert da empresa."""
+    if empresa.cert_pfx and empresa.cert_password_encrypted:
+        return (
+            empresa.cert_pfx.path,
+            empresa.get_cert_password(),
+            empresa.ver_aplic or 'NFCE-DJANGO-1.0',
+        )
+
     setting = DfeSetting.objects.first()
+    if not setting:
+        raise Exception(
+            f'Empresa {empresa.cnpj} não possui certificado cadastrado e não há DfeSetting global.'
+        )
+    return setting.cert_path, setting.cert_password, setting.ver_aplic
+
+
+MAX_LOTES_POR_CAPTURA = 200  # teto de segurança (200 * 50 = 10.000 docs)
+
+
+def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
+    """Captura iterativamente todos os lotes disponíveis na SEF-SC.
+
+    O serviço retorna até 50 documentos por chamada (cStat=118). Continuamos
+    chamando enquanto a SEFAZ devolver lote cheio, parando em cStat≠118,
+    qtDfeRet<50, NSU sem avanço, ou no teto max_lotes.
+    """
+    empresa = Empresa.objects.get(cnpj=cnpj)
+    cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
 
     state, _ = DfeSyncState.objects.get_or_create(empresa=empresa)
 
-    xml_dist = build_xml_dist_nsu(
-        cnpj=empresa.cnpj,
-        ult_nsu=state.ultimo_nsu_sc,
-        ver_aplic=setting.ver_aplic,
-    )
+    lotes = []
+    total_docs = 0
+    nsu_inicial = state.ultimo_nsu_sc
+    ultimo_cstat = None
+    ultimo_motivo = None
+    parou_por = 'sem_mais_documentos'
 
-    response_xml = enviar_requisicao(
-        xml_dist=xml_dist,
-        cert_pfx_path=setting.cert_path,
-        cert_password=setting.cert_password,
-    )
+    for i in range(max_lotes):
+        nsu_antes = state.ultimo_nsu_sc
 
-    root = etree.fromstring(response_xml)
+        xml_dist = build_xml_dist_nsu(
+            cnpj=empresa.cnpj,
+            ult_nsu=nsu_antes,
+            ver_aplic=ver_aplic,
+        )
 
-    cstat = extrair_texto(root, 'cStat')
-    xmotivo = extrair_texto(root, 'xMotivo')
-    ult_nsu_ret = extrair_texto(root, 'ultNuNSURet')
-    qt_dfe_ret = extrair_texto(root, 'qtDfeRet')
-    lote_dist_comp = extrair_texto(root, 'loteDistComp')
+        response_xml = enviar_requisicao(
+            xml_dist=xml_dist,
+            cert_pfx_path=cert_path,
+            cert_password=cert_password,
+        )
 
-    state.ultimo_cstat = cstat
-    state.ultimo_motivo = xmotivo
-    state.ultima_captura = timezone.now()
+        root = _safe_fromstring(response_xml)
 
-    if ult_nsu_ret:
-        state.ultimo_nsu_sc = int(ult_nsu_ret)
+        cstat = extrair_texto(root, 'cStat')
+        xmotivo = extrair_texto(root, 'xMotivo')
+        ult_nsu_ret = extrair_texto(root, 'ultNuNSURet')
+        qt_dfe_ret = extrair_texto(root, 'qtDfeRet')
+        lote_dist_comp = extrair_texto(root, 'loteDistComp')
 
-    if cstat == '110':
-        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=1)
+        qt_int = int(qt_dfe_ret) if qt_dfe_ret else 0
+        ultimo_cstat = cstat
+        ultimo_motivo = xmotivo
+        state.ultimo_cstat = cstat
+        state.ultimo_motivo = xmotivo
+        state.ultima_captura = timezone.now()
 
-    elif cstat == '117':
-        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=12)
+        if ult_nsu_ret:
+            state.ultimo_nsu_sc = int(ult_nsu_ret)
 
-    elif cstat == '118':
-        if lote_dist_comp:
+        if cstat == '118' and lote_dist_comp:
             lote_xml = descompactar_lote(lote_dist_comp)
             persistir_lote(empresa, lote_xml)
 
-        if qt_dfe_ret and int(qt_dfe_ret) < 50:
-            state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=12)
-        else:
-            state.proxima_captura_em = timezone.now()
+        lotes.append({
+            'iteracao': i + 1,
+            'cstat': cstat,
+            'xmotivo': xmotivo,
+            'nsu_antes': nsu_antes,
+            'nsu_depois': state.ultimo_nsu_sc,
+            'qt_dfe_ret': qt_int,
+        })
+        total_docs += qt_int
 
-    elif cstat == '657':
-        state.bloqueado_ate = timezone.now() + timezone.timedelta(hours=1)
-        state.proxima_captura_em = state.bloqueado_ate
+        # Bloqueio / throttle do WS — para imediatamente e agenda re-tentativa.
+        if cstat == '657':
+            state.bloqueado_ate = timezone.now() + timezone.timedelta(hours=1)
+            state.proxima_captura_em = state.bloqueado_ate
+            parou_por = 'bloqueado_657'
+            break
+
+        # Critérios de parada normais.
+        if cstat != '118':
+            parou_por = f'cstat_{cstat}'
+            break
+        if qt_int < 50:
+            parou_por = 'lote_parcial'
+            break
+        if state.ultimo_nsu_sc == nsu_antes:
+            parou_por = 'nsu_sem_avanco'
+            break
+    else:
+        parou_por = 'limite_max_lotes'
+
+    # Agendamento da próxima captura automática (mantém comportamento anterior).
+    if ultimo_cstat == '110':
+        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=1)
+    elif ultimo_cstat == '117':
+        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=12)
+    elif ultimo_cstat == '118':
+        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=12)
 
     state.save()
 
     return {
         'cnpj': cnpj,
-        'cstat': cstat,
-        'xmotivo': xmotivo,
+        'cstat': ultimo_cstat,
+        'xmotivo': ultimo_motivo,
         'ult_nsu': state.ultimo_nsu_sc,
-        'qt_dfe_ret': qt_dfe_ret,
+        'nsu_inicial': nsu_inicial,
+        'qt_dfe_ret': total_docs,
+        'lotes': lotes,
+        'parou_por': parou_por,
     }
 
 
 def persistir_lote(empresa: Empresa, lote_xml: bytes):
-    lote_root = etree.fromstring(lote_xml)
+    lote_root = _safe_fromstring(lote_xml)
 
     for dist in lote_root.findall('.//{*}distNFCeSC'):
         nsu = dist.attrib.get('NSU')
@@ -119,14 +210,28 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
             defaults={
                 'tipo_documento': tipo,
                 'xml': xml,
-                'cancelada': tipo == 'EVENTO_CANCELAMENTO',
+                'emitido_em': _extrair_dh_emi(xml),
+                # Evento em si não é "cancelado"; quem fica cancelada é a NFC-e ligada.
+                'cancelada': False,
             }
         )
+
+        # Ao receber um evento de cancelamento (tpEvento 110111/110112),
+        # marca a NFC-e correspondente como cancelada.
+        if tipo == 'EVENTO_CANCELAMENTO':
+            NfceDocumento.objects.filter(
+                empresa=empresa,
+                chave_acesso=chave,
+                tipo_documento='NFE_PROC',
+            ).update(
+                cancelada=True,
+                cancelamento_verificado_em=timezone.now(),
+            )
 
 
 def extrair_chave_do_xml(xml: str):
     try:
-        root = etree.fromstring(xml.encode('utf-8'))
+        root = _safe_fromstring(xml.encode('utf-8'))
 
         inf_nfe = root.find('.//{*}infNFe')
         if inf_nfe is not None:
@@ -148,12 +253,7 @@ def extrair_chave_do_xml(xml: str):
 
 def resync_sc_para_cnpj(cnpj: str):
     empresa = Empresa.objects.get(cnpj=cnpj)
-    setting = DfeSetting.objects.first()
-
-    if not setting:
-        raise Exception(
-            'Nenhuma configuração DfeSetting encontrada. Cadastre o certificado e as configurações da SEF/SC.'
-        )
+    cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
 
     state, _ = DfeSyncState.objects.get_or_create(empresa=empresa)
 
@@ -170,16 +270,16 @@ def resync_sc_para_cnpj(cnpj: str):
     xml_dist = build_xml_dist_nsu(
         cnpj=empresa.cnpj,
         ult_nsu=nsu_resync,
-        ver_aplic=setting.ver_aplic,
+        ver_aplic=ver_aplic,
     )
 
     response_xml = enviar_requisicao(
         xml_dist=xml_dist,
-        cert_pfx_path=setting.cert_path,
-        cert_password=setting.cert_password,
+        cert_pfx_path=cert_path,
+        cert_password=cert_password,
     )
 
-    root = etree.fromstring(response_xml)
+    root = _safe_fromstring(response_xml)
 
     cstat = extrair_texto(root, 'cStat')
     xmotivo = extrair_texto(root, 'xMotivo')
@@ -257,21 +357,22 @@ def verificar_cancelamentos_sc_pendentes():
 
 
 def consultar_documento_por_chave(cnpj: str, chave_acesso: str):
-    setting = DfeSetting.objects.first()
+    empresa = Empresa.objects.get(cnpj=cnpj)
+    cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
 
     xml_dist = build_xml_sol_dfe(
         cnpj=cnpj,
         chave_acesso=chave_acesso,
-        ver_aplic=setting.ver_aplic,
+        ver_aplic=ver_aplic,
     )
 
     response_xml = enviar_requisicao(
         xml_dist=xml_dist,
-        cert_pfx_path=setting.cert_path,
-        cert_password=setting.cert_password,
+        cert_pfx_path=cert_path,
+        cert_password=cert_password,
     )
 
-    root = etree.fromstring(response_xml)
+    root = _safe_fromstring(response_xml)
 
     cstat = extrair_texto(root, 'cStat')
     xmotivo = extrair_texto(root, 'xMotivo')
