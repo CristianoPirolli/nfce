@@ -31,14 +31,43 @@ def _nome_entrada_zip(chave: str, tipo: str) -> str:
     return f'{chave}-evento_cancelada.xml'
 
 
-def _caminho_zip(empresa, emitido_em):
-    """Resolve (pasta, arquivo_zip) para a NFC-e a partir de dhEmi (fallback now)."""
+def _ano_mes_da_chave(chave: str):
+    """Extrai (ano, mês) dos dígitos AAMM da chave de acesso da NFC-e.
+
+    Layout chNFe (44 dígitos): cUF(2) + AAMM(4) + CNPJ(14) + mod(2) + ...
+    Retorna (None, None) se a chave não tem o formato esperado.
+    """
+    if not chave or len(chave) < 6 or not chave.isdigit():
+        return None, None
+    aa = int(chave[2:4])
+    mm = int(chave[4:6])
+    if not (1 <= mm <= 12):
+        return None, None
+    return 2000 + aa, mm
+
+
+def _caminho_zip(empresa, emitido_em, chave: str = ''):
+    """Resolve (pasta, arquivo_zip) para a NFC-e ou evento.
+
+    Ordem de precedência para o mês/ano:
+      1) emitido_em (dhEmi do XML) — válido para NFE_PROC
+      2) AAMM extraído da chave    — usado para eventos (dhRegEvento ≠ dhEmi)
+      3) now() — fallback final
+    """
     root = getattr(settings, 'NFCE_XML_ROOT', None)
     if not root:
         return None, None
-    ref = emitido_em or timezone.now()
-    pasta = root / empresa.cnpj / f'{ref.year:04d}'
-    return pasta, pasta / f'{ref.month:02d}.zip'
+
+    if emitido_em:
+        ano, mes = emitido_em.year, emitido_em.month
+    else:
+        ano, mes = _ano_mes_da_chave(chave)
+        if not ano:
+            agora = timezone.now()
+            ano, mes = agora.year, agora.month
+
+    pasta = root / empresa.cnpj / f'{ano:04d}'
+    return pasta, pasta / f'{mes:02d}.zip'
 
 
 def _gravar_zip_com_retry(arquivo_zip, pasta, entradas, tentativas=4):
@@ -285,7 +314,7 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
             continue
 
         emitido_em = _extrair_dh_emi(xml)
-        pasta, arquivo_zip = _caminho_zip(empresa, emitido_em)
+        pasta, arquivo_zip = _caminho_zip(empresa, emitido_em, chave)
         entrada = _nome_entrada_zip(chave, tipo)
 
         resumo = _extrair_resumo(xml) if tipo == 'NFE_PROC' else {
