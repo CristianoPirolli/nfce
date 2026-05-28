@@ -119,9 +119,9 @@
         <tr>
             <td>{{ linha.doc.nsu }}</td>
             <td><span class="badge badge-info">{{ linha.doc.get_tipo_documento_display }}</span></td>
-            <td>{{ linha.resumo.numero }}{% if linha.resumo.serie %}/{{ linha.resumo.serie }}{% endif %}</td>
-            <td>{{ linha.resumo.emitido_em }}</td>
-            <td>{% if linha.resumo.valor %}R$ {{ linha.resumo.valor }}{% endif %}</td>
+            <td>{{ linha.doc.numero_nfce }}{% if linha.doc.serie %}/{{ linha.doc.serie }}{% endif %}</td>
+            <td>{{ linha.doc.emitido_em|date:"d/m/Y H:i" }}</td>
+            <td>{% if linha.doc.valor_total %}R$ {{ linha.doc.valor_total }}{% endif %}</td>
             <td style="font-family:monospace; font-size:12px;">{{ linha.doc.chave_acesso }}</td>
             <td>
                 {% if linha.doc.cancelada %}

@@ -39,10 +39,20 @@
 {% endif %}
 
 <h2>XML da NFC-e</h2>
-<pre class="xml">{{ doc.xml }}</pre>
+{% if doc_xml %}
+<pre class="xml">{{ doc_xml }}</pre>
+{% else %}
+<div class="card" style="color:#92400e; background:#fef3c7;">
+    XML não encontrado em <code>{{ doc.arquivo_zip }}</code> (entrada <code>{{ doc.arquivo_entrada }}</code>).
+</div>
+{% endif %}
 
 {% if evento %}
 <h2 style="margin-top:24px;">XML do evento de cancelamento</h2>
-<pre class="xml">{{ evento.xml }}</pre>
+{% if evento_xml %}
+<pre class="xml">{{ evento_xml }}</pre>
+{% else %}
+<div class="card" style="color:#92400e; background:#fef3c7;">XML do evento não encontrado em disco.</div>
+{% endif %}
 {% endif %}
 {% endblock %}

@@ -7,8 +7,11 @@ Django==6.0.5
 idna==3.16
 lxml==6.1.1
 pycparser==3.0
+python-dotenv==1.2.2
 requests==2.34.2
 requests_pkcs12==1.27
 sqlparse==0.5.5
 tzdata==2026.2
 urllib3==2.7.0
+psycopg==3.3.4
+psycopg-binary==3.3.4

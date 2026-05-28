@@ -1,10 +1,26 @@
+import zipfile
 from datetime import datetime
+from pathlib import Path
 
 from django.contrib import messages
 from django.core.paginator import Paginator
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from lxml import etree
+
+
+def _ler_xml(doc) -> str:
+    """Lê o XML do documento a partir do .zip mensal indicado em arquivo_zip."""
+    if not doc.arquivo_zip or not doc.arquivo_entrada:
+        return ''
+    caminho = Path(doc.arquivo_zip)
+    if not caminho.exists():
+        return ''
+    try:
+        with zipfile.ZipFile(caminho, mode='r') as zf:
+            return zf.read(doc.arquivo_entrada).decode('utf-8')
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return ''
 
 _SAFE_XML_PARSER = etree.XMLParser(
     resolve_entities=False,
@@ -82,8 +98,11 @@ def remover_certificado(request, empresa_id):
 def _resumo_nfce(doc: NfceDocumento) -> dict:
     """Extrai número, série, valor e data de emissão do XML para exibição."""
     out = {'numero': '', 'serie': '', 'valor': '', 'emitido_em': ''}
+    xml = _ler_xml(doc)
+    if not xml:
+        return out
     try:
-        root = etree.fromstring(doc.xml.encode('utf-8'), parser=_SAFE_XML_PARSER)
+        root = etree.fromstring(xml.encode('utf-8'), parser=_SAFE_XML_PARSER)
     except Exception:
         return out
 
@@ -148,7 +167,9 @@ def consulta_empresa(request, empresa_id):
     paginator = Paginator(qs, 50)
     page = paginator.get_page(request.GET.get('page'))
 
-    linhas = [{'doc': d, 'resumo': _resumo_nfce(d)} for d in page.object_list]
+    # Usa os campos denormalizados (numero_nfce / serie / valor_total / emitido_em)
+    # direto do DB — não reabre o .zip para cada linha.
+    linhas = [{'doc': d} for d in page.object_list]
 
     state = getattr(empresa, 'dfesyncstate', None)
 
@@ -216,8 +237,11 @@ def _resumo_evento(doc: NfceDocumento) -> dict:
         'cstat': '', 'xmotivo': '', 'tp_evento': '', 'n_seq_evento': '',
         'dh_reg_evento': '', 'n_prot': '', 'ver_aplic': '',
     }
+    xml = _ler_xml(doc)
+    if not xml:
+        return out
     try:
-        root = etree.fromstring(doc.xml.encode('utf-8'), parser=_SAFE_XML_PARSER)
+        root = etree.fromstring(xml.encode('utf-8'), parser=_SAFE_XML_PARSER)
     except Exception:
         return out
 
@@ -261,14 +285,20 @@ def consulta_documento(request, doc_id):
 
     return render(request, 'dfe/consulta/documento.html', {
         'doc': doc,
+        'doc_xml': _ler_xml(doc),
         'resumo': _resumo_nfce(doc),
         'evento': evento,
+        'evento_xml': _ler_xml(evento) if evento else '',
         'evento_resumo': evento_resumo,
     })
 
 
 def consulta_documento_xml(request, doc_id):
     doc = get_object_or_404(NfceDocumento, id=doc_id)
-    response = HttpResponse(doc.xml, content_type='application/xml; charset=utf-8')
-    response['Content-Disposition'] = f'attachment; filename="{doc.chave_acesso}.xml"'
+    xml = _ler_xml(doc)
+    if not xml:
+        raise Http404('XML não disponível no disco.')
+    nome = doc.arquivo_entrada or f'{doc.chave_acesso}.xml'
+    response = HttpResponse(xml, content_type='application/xml; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="{nome}"'
     return response

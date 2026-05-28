@@ -222,3 +222,9 @@ __marimo__/
 *.pem
 *.key
 *.pfx
+certificados/
+private_certs/
+
+# Dumps SOAP gerados pelo cliente SEFAZ (contém CNPJ e payload da consulta)
+debug_request_soap.xml
+debug_response_soap.xml

@@ -1,9 +1,13 @@
 import base64
 import gzip
+import logging
 from datetime import datetime
 from io import BytesIO
 from lxml import etree
+from django.conf import settings
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 _SAFE_XML_PARSER = etree.XMLParser(
     resolve_entities=False,
@@ -15,6 +19,76 @@ _SAFE_XML_PARSER = etree.XMLParser(
 
 def _safe_fromstring(data):
     return etree.fromstring(data, parser=_SAFE_XML_PARSER)
+
+
+import time
+import zipfile
+
+
+def _nome_entrada_zip(chave: str, tipo: str) -> str:
+    if tipo == 'NFE_PROC':
+        return f'{chave}.xml'
+    return f'{chave}-evento_cancelada.xml'
+
+
+def _caminho_zip(empresa, emitido_em):
+    """Resolve (pasta, arquivo_zip) para a NFC-e a partir de dhEmi (fallback now)."""
+    root = getattr(settings, 'NFCE_XML_ROOT', None)
+    if not root:
+        return None, None
+    ref = emitido_em or timezone.now()
+    pasta = root / empresa.cnpj / f'{ref.year:04d}'
+    return pasta, pasta / f'{ref.month:02d}.zip'
+
+
+def _gravar_zip_com_retry(arquivo_zip, pasta, entradas, tentativas=4):
+    """Abre o .zip uma única vez e escreve todas as entradas.
+
+    `entradas` é uma lista de tuplas (nome_entrada, xml_str).
+    Faz retry com backoff em OSError (lock SMB, antivírus, share intermitente).
+    """
+    espera = 0.5
+    ultimo_erro = None
+    for tentativa in range(1, tentativas + 1):
+        try:
+            pasta.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(arquivo_zip, mode='a', compression=zipfile.ZIP_DEFLATED) as zf:
+                for nome, xml in entradas:
+                    zf.writestr(nome, xml)
+            return
+        except OSError as exc:
+            ultimo_erro = exc
+            logger.warning(
+                'Falha ao escrever %s (tentativa %d/%d): %s',
+                arquivo_zip, tentativa, tentativas, exc,
+            )
+            time.sleep(espera)
+            espera *= 2
+    raise ultimo_erro
+
+
+def _extrair_resumo(xml_str: str) -> dict:
+    """Extrai número, série e valor total do XML para denormalizar no DB."""
+    out = {'numero_nfce': '', 'serie': '', 'valor_total': None}
+    try:
+        root = _safe_fromstring(xml_str.encode('utf-8'))
+    except Exception:
+        return out
+
+    def _t(tag):
+        el = root.find(f'.//{{*}}{tag}')
+        return el.text if el is not None and el.text else ''
+
+    out['numero_nfce'] = _t('nNF')
+    out['serie'] = _t('serie')
+    valor = _t('vNF')
+    if valor:
+        from decimal import Decimal, InvalidOperation
+        try:
+            out['valor_total'] = Decimal(valor)
+        except InvalidOperation:
+            pass
+    return out
 
 
 def _extrair_dh_emi(xml_str: str):
@@ -178,8 +252,16 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
 
 
 def persistir_lote(empresa: Empresa, lote_xml: bytes):
+    """Persiste todos os documentos de um lote agrupando escritas por .zip mensal.
+
+    Estratégia: extrai todos os documentos do lote → agrupa por (pasta, arquivo_zip)
+    → abre cada zip uma única vez (com retry) → comita as linhas no DB.
+    Reduz drasticamente locks/permission-denied no compartilhamento SMB.
+    """
     lote_root = _safe_fromstring(lote_xml)
 
+    # Etapa 1 — extrai e classifica todos os documentos do lote.
+    docs = []
     for dist in lote_root.findall('.//{*}distNFCeSC'):
         nsu = dist.attrib.get('NSU')
         chave = dist.attrib.get('chAcesso')
@@ -199,34 +281,76 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
 
         if not chave:
             chave = extrair_chave_do_xml(xml)
-
         if not chave:
             continue
 
+        emitido_em = _extrair_dh_emi(xml)
+        pasta, arquivo_zip = _caminho_zip(empresa, emitido_em)
+        entrada = _nome_entrada_zip(chave, tipo)
+
+        resumo = _extrair_resumo(xml) if tipo == 'NFE_PROC' else {
+            'numero_nfce': '', 'serie': '', 'valor_total': None,
+        }
+
+        docs.append({
+            'nsu': int(nsu),
+            'chave': chave,
+            'tipo': tipo,
+            'xml': xml,
+            'emitido_em': emitido_em,
+            'pasta': pasta,
+            'arquivo_zip': arquivo_zip,
+            'entrada': entrada,
+            'numero_nfce': resumo['numero_nfce'],
+            'serie': resumo['serie'],
+            'valor_total': resumo['valor_total'],
+        })
+
+    if not docs:
+        return
+
+    # Etapa 2 — agrupa por zip e escreve em batch (com retry).
+    # Pula a escrita se NFCE_XML_ROOT não estiver configurado.
+    if getattr(settings, 'NFCE_XML_ROOT', None):
+        grupos = {}
+        for d in docs:
+            chave_grupo = str(d['arquivo_zip'])
+            grupos.setdefault(chave_grupo, {'pasta': d['pasta'], 'zip': d['arquivo_zip'], 'entradas': []})
+            grupos[chave_grupo]['entradas'].append((d['entrada'], d['xml']))
+
+        for g in grupos.values():
+            _gravar_zip_com_retry(g['zip'], g['pasta'], g['entradas'])
+
+    # Etapa 3 — comita as linhas no DB.
+    cancelamentos = []  # chaves cujas NFC-e precisam ser marcadas como canceladas
+    for d in docs:
         NfceDocumento.objects.update_or_create(
             empresa=empresa,
-            chave_acesso=chave,
-            nsu=int(nsu),
+            chave_acesso=d['chave'],
+            nsu=d['nsu'],
             defaults={
-                'tipo_documento': tipo,
-                'xml': xml,
-                'emitido_em': _extrair_dh_emi(xml),
-                # Evento em si não é "cancelado"; quem fica cancelada é a NFC-e ligada.
+                'tipo_documento': d['tipo'],
+                'arquivo_zip': str(d['arquivo_zip']) if d['arquivo_zip'] else '',
+                'arquivo_entrada': d['entrada'],
+                'emitido_em': d['emitido_em'],
+                'numero_nfce': d['numero_nfce'],
+                'serie': d['serie'],
+                'valor_total': d['valor_total'],
                 'cancelada': False,
             }
         )
+        if d['tipo'] == 'EVENTO_CANCELAMENTO':
+            cancelamentos.append(d['chave'])
 
-        # Ao receber um evento de cancelamento (tpEvento 110111/110112),
-        # marca a NFC-e correspondente como cancelada.
-        if tipo == 'EVENTO_CANCELAMENTO':
-            NfceDocumento.objects.filter(
-                empresa=empresa,
-                chave_acesso=chave,
-                tipo_documento='NFE_PROC',
-            ).update(
-                cancelada=True,
-                cancelamento_verificado_em=timezone.now(),
-            )
+    if cancelamentos:
+        NfceDocumento.objects.filter(
+            empresa=empresa,
+            chave_acesso__in=cancelamentos,
+            tipo_documento='NFE_PROC',
+        ).update(
+            cancelada=True,
+            cancelamento_verificado_em=timezone.now(),
+        )
 
 
 def extrair_chave_do_xml(xml: str):

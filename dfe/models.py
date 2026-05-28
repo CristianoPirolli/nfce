@@ -108,8 +108,17 @@ class NfceDocumento(models.Model):
         ]
     )
 
-    xml = models.TextField()
+    # Caminho do arquivo .zip mensal que contém o XML deste documento.
+    arquivo_zip = models.CharField(max_length=500, blank=True, default='')
+    # Nome da entrada dentro do .zip (ex.: "<chave>.xml" ou "<chave>-evento_cancelada.xml").
+    arquivo_entrada = models.CharField(max_length=200, blank=True, default='')
     emitido_em = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    # Dados denormalizados para listagem rápida (evita reabrir o .zip por linha).
+    numero_nfce = models.CharField(max_length=15, blank=True, default='', db_index=True)
+    serie = models.CharField(max_length=5, blank=True, default='')
+    valor_total = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+
     cancelada = models.BooleanField(default=False)
     cancelamento_verificado_em = models.DateTimeField(null=True, blank=True)
     capturado_em = models.DateTimeField(auto_now_add=True)
