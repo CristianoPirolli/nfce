@@ -8,6 +8,10 @@ def empresa_cert_upload_path(instance, filename):
     return f'empresa_{instance.cnpj}/{filename}'
 
 
+def contador_cert_upload_path(instance, filename):
+    return f'contador/{filename}'
+
+
 private_cert_storage = FileSystemStorage(location=str(settings.PRIVATE_CERTS_ROOT))
 
 
@@ -18,7 +22,28 @@ def _fernet() -> Fernet:
     return Fernet(key)
 
 
-class Empresa(models.Model):
+class CertPasswordMixin:
+    """Guarda/recupera a senha do .pfx criptografada com Fernet.
+
+    Requer que o modelo tenha o campo BinaryField `cert_password_encrypted`.
+    """
+
+    def set_cert_password(self, plaintext: str) -> None:
+        if not plaintext:
+            self.cert_password_encrypted = None
+            return
+        self.cert_password_encrypted = _fernet().encrypt(plaintext.encode('utf-8'))
+
+    def get_cert_password(self) -> str:
+        if not self.cert_password_encrypted:
+            return ''
+        try:
+            return _fernet().decrypt(bytes(self.cert_password_encrypted)).decode('utf-8')
+        except InvalidToken:
+            raise ValueError('Senha do certificado não pôde ser decriptada (chave incorreta).')
+
+
+class Empresa(CertPasswordMixin, models.Model):
     razao_social = models.CharField(max_length=255)
     cnpj = models.CharField(max_length=14, unique=True)
     ativa = models.BooleanField(default=True)
@@ -41,35 +66,41 @@ class Empresa(models.Model):
     cert_validade = models.DateTimeField(null=True, blank=True)
     ver_aplic = models.CharField(max_length=20, default='NFCE-DJANGO-1.0')
 
-    def set_cert_password(self, plaintext: str) -> None:
-        if not plaintext:
-            self.cert_password_encrypted = None
-            return
-        self.cert_password_encrypted = _fernet().encrypt(plaintext.encode('utf-8'))
-
-    def get_cert_password(self) -> str:
-        if not self.cert_password_encrypted:
-            return ''
-        try:
-            return _fernet().decrypt(bytes(self.cert_password_encrypted)).decode('utf-8')
-        except InvalidToken:
-            raise ValueError('Senha do certificado não pôde ser decriptada (chave incorreta).')
-
     def __str__(self):
         return f'{self.razao_social} - {self.cnpj}'
 
 
-class DfeSetting(models.Model):
+class DfeSetting(CertPasswordMixin, models.Model):
+    """Certificado único do escritório contábil, usado por todas as empresas
+    que não tenham um certificado próprio cadastrado (override)."""
+
     nfce_sc_cert_cnpj_contador = models.CharField(
         max_length=14,
-        help_text='CNPJ do escritório contábil responsável pelo certificado.'
+        blank=True,
+        default='',
+        help_text='CNPJ do escritório contábil (lido do certificado no upload).'
     )
-    cert_path = models.CharField(max_length=500)
-    cert_password = models.CharField(max_length=255)
+
+    # Certificado do contador (upload A1 .pfx, senha criptografada).
+    cert_pfx = models.FileField(
+        upload_to=contador_cert_upload_path,
+        storage=private_cert_storage,
+        blank=True,
+        null=True,
+        help_text='Certificado A1 (.pfx) do contador. Usado por todas as empresas '
+                  'sem certificado próprio. Armazenado em diretório privado.'
+    )
+    cert_password_encrypted = models.BinaryField(blank=True, null=True)
+    cert_validade = models.DateTimeField(null=True, blank=True)
     ver_aplic = models.CharField(max_length=20, default='NFCE-DJANGO-1.0')
 
+    # Legado — configuração antiga por caminho no disco + senha em texto puro.
+    # Mantido para compatibilidade; o upload criptografado acima tem prioridade.
+    cert_path = models.CharField(max_length=500, blank=True, default='')
+    cert_password = models.CharField(max_length=255, blank=True, default='')
+
     def __str__(self):
-        return f'Configuração DFe SC - {self.nfce_sc_cert_cnpj_contador}'
+        return f'Certificado do contador - {self.nfce_sc_cert_cnpj_contador or "(sem CNPJ)"}'
 
 
 class DfeSyncState(models.Model):
@@ -84,6 +115,15 @@ class DfeSyncState(models.Model):
     # Controle do último retorno da SEF/SC
     ultimo_cstat = models.CharField(max_length=10, blank=True, null=True)
     ultimo_motivo = models.TextField(blank=True, null=True)
+
+    # Última falha de comunicação (timeout, conexão, 5xx, payload inválido).
+    ultimo_erro = models.TextField(blank=True, default='')
+    ultimo_erro_em = models.DateTimeField(null=True, blank=True)
+
+    # Claim de execução pelo worker assíncrono (evita processamento duplo).
+    em_execucao = models.BooleanField(default=False)
+    execucao_iniciada_em = models.DateTimeField(null=True, blank=True)
+    worker_id = models.CharField(max_length=120, blank=True, default='')
 
     # Controle de re-sincronização
     ultimo_resync_em = models.DateTimeField(null=True, blank=True)

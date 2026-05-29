@@ -61,3 +61,41 @@ class CertificadoUploadForm(forms.Form):
     @property
     def info_cert(self):
         return self._info
+
+
+class CertificadoContadorForm(forms.Form):
+    """Upload do certificado único do contador. Não valida CNPJ titular contra
+    empresa alguma — o titular é o próprio escritório contábil."""
+
+    cert_pfx = forms.FileField(label='Arquivo .pfx do certificado do contador')
+    cert_password = forms.CharField(
+        label='Senha do certificado',
+        widget=forms.PasswordInput(render_value=False),
+        max_length=255,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._info = None
+
+    def clean(self):
+        cleaned = super().clean()
+        arquivo = cleaned.get('cert_pfx')
+        senha = cleaned.get('cert_password')
+
+        if not arquivo or not senha:
+            return cleaned
+
+        pfx_bytes = arquivo.read()
+        arquivo.seek(0)
+
+        try:
+            self._info = inspecionar_pfx(pfx_bytes, senha)
+        except CertificadoInvalido as exc:
+            raise forms.ValidationError(str(exc))
+
+        return cleaned
+
+    @property
+    def info_cert(self):
+        return self._info

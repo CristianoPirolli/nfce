@@ -140,3 +140,30 @@ if not CERT_SECRET_KEY:
 # Vazio/None = não grava em disco, mantém apenas no banco.
 _xml_root = os.environ.get('NFCE_XML_ROOT', '').strip()
 NFCE_XML_ROOT = Path(_xml_root) if _xml_root else None
+
+
+def _env_int(name: str, default: int) -> int:
+    val = os.environ.get(name)
+    if val is None or not val.strip():
+        return default
+    try:
+        return int(val.strip())
+    except ValueError:
+        return default
+
+
+# === Worker assíncrono de captura ===
+# Threads simultâneas (CNPJs capturados em paralelo).
+DFE_WORKER_CONCURRENCY = _env_int('DFE_WORKER_CONCURRENCY', 5)
+# Intervalo entre ciclos do loop do worker, em segundos.
+DFE_WORKER_CICLO_SEGUNDOS = _env_int('DFE_WORKER_CICLO_SEGUNDOS', 30)
+# Cadência da verificação global de cancelamentos pendentes, em minutos.
+DFE_CANCELAMENTOS_INTERVALO_MIN = _env_int('DFE_CANCELAMENTOS_INTERVALO_MIN', 60)
+# Cadência do resync por empresa, em horas.
+DFE_RESYNC_INTERVALO_HORAS = _env_int('DFE_RESYNC_INTERVALO_HORAS', 24)
+# Idade (min) que torna um claim de execução "órfão" e re-reivindicável.
+DFE_CLAIM_ORFAO_MIN = _env_int('DFE_CLAIM_ORFAO_MIN', 30)
+# Piso de segurança (min): nunca inicia nova captura de um CNPJ cuja última
+# consulta válida (ultima_captura) foi há menos que isto — rede de proteção
+# extra contra consumo indevido, independente do agendamento normal.
+DFE_MIN_INTERVALO_CAPTURA_MIN = _env_int('DFE_MIN_INTERVALO_CAPTURA_MIN', 30)

@@ -30,12 +30,11 @@ class DfeSettingAdmin(admin.ModelAdmin):
     list_display = (
         'id',
         'nfce_sc_cert_cnpj_contador',
-        'cert_path',
+        'cert_validade',
         'ver_aplic',
     )
     search_fields = (
         'nfce_sc_cert_cnpj_contador',
-        'cert_path',
     )
 
     def has_add_permission(self, request):
@@ -80,6 +79,8 @@ class DfeSyncStateAdmin(admin.ModelAdmin):
         'bloqueado_ate',
         'ultimo_cstat',
         'ultimo_motivo',
+        'ultimo_erro',
+        'ultimo_erro_em',
         'ultimo_resync_em',
     )
     ordering = (

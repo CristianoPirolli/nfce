@@ -1,10 +1,11 @@
 import base64
 import gzip
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from lxml import etree
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,16 @@ def _caminho_zip(empresa, emitido_em, chave: str = ''):
     return pasta, pasta / f'{mes:02d}.zip'
 
 
+def _entradas_existentes(arquivo_zip) -> set:
+    """Retorna o conjunto de nomes de entrada já presentes no ZIP, ou vazio se não existe."""
+    import zipfile as _zf
+    try:
+        with _zf.ZipFile(arquivo_zip, 'r') as zf:
+            return set(zf.namelist())
+    except (FileNotFoundError, _zf.BadZipFile):
+        return set()
+
+
 def _gravar_zip_com_retry(arquivo_zip, pasta, entradas, tentativas=4):
     """Abre o .zip uma única vez e escreve todas as entradas.
 
@@ -94,6 +105,18 @@ def _gravar_zip_com_retry(arquivo_zip, pasta, entradas, tentativas=4):
             time.sleep(espera)
             espera *= 2
     raise ultimo_erro
+
+
+def _gravar_zip_sem_duplicata(arquivo_zip, pasta, entradas, tentativas=4):
+    """Igual a _gravar_zip_com_retry, mas ignora entradas já presentes no ZIP.
+
+    Garante idempotência: re-processar um lote após falha parcial do ZIP não
+    cria entradas duplicadas no arquivo.
+    """
+    existentes = _entradas_existentes(arquivo_zip)
+    novas = [(nome, xml) for nome, xml in entradas if nome not in existentes]
+    if novas:
+        _gravar_zip_com_retry(arquivo_zip, pasta, novas, tentativas=tentativas)
 
 
 def _extrair_resumo(xml_str: str) -> dict:
@@ -139,7 +162,33 @@ from dfe.services.sefaz_sc_distribuicao_client import (
     build_xml_dist_nsu,
     build_xml_sol_dfe,
     enviar_requisicao,
+    SefazError,
+    SefazPermanenteError,
+    SefazTransitorioError,
 )
+
+
+# Re-tentativa após falha de comunicação.
+RETRY_TRANSITORIO_MIN = 10   # timeout/conexão/5xx — provável instabilidade momentânea
+RETRY_PERMANENTE_MIN = 60    # SSL/4xx/config — espera mais antes de tentar de novo
+
+# Fallback de agendamento (em horas) por cStat após uma resposta válida.
+# QUALQUER cStat não listado usa o default — nunca deixa o CNPJ "devido"
+# indefinidamente (proteção contra consumo indevido do SEFAZ).
+_INTERVALO_PROXIMA_HORAS = {
+    '110': 1,    # nenhum NSU novo — pode reconsultar em 1h
+    '117': 12,   # sincronizado (nada novo) — folga maior
+    '118': 12,   # houve documentos mas a rodada parou (parcial/teto) — conservador
+    '108': 1,    # serviço paralisado momentaneamente — espera o serviço voltar
+    '109': 1,    # serviço paralisado sem previsão — idem
+}
+_INTERVALO_PROXIMA_DEFAULT_HORAS = 1
+
+
+def _intervalo_proxima(ultimo_cstat):
+    """timedelta até a próxima captura, sempre >= 1h, com fallback seguro."""
+    horas = _INTERVALO_PROXIMA_HORAS.get(ultimo_cstat, _INTERVALO_PROXIMA_DEFAULT_HORAS)
+    return timedelta(hours=horas)
 
 
 def extrair_texto(xml_root, tag_name):
@@ -153,7 +202,13 @@ def descompactar_lote(lote_dist_comp: str) -> bytes:
 
 
 def _resolver_cert(empresa: Empresa):
-    """Retorna (cert_path, cert_password, ver_aplic) priorizando o cert da empresa."""
+    """Retorna (cert_path, cert_password, ver_aplic).
+
+    Prioridade:
+      1) Certificado próprio da empresa (override).
+      2) Certificado do contador via upload criptografado (DfeSetting.cert_pfx).
+      3) Configuração legada por caminho no disco (DfeSetting.cert_path).
+    """
     if empresa.cert_pfx and empresa.cert_password_encrypted:
         return (
             empresa.cert_pfx.path,
@@ -164,9 +219,28 @@ def _resolver_cert(empresa: Empresa):
     setting = DfeSetting.objects.first()
     if not setting:
         raise Exception(
-            f'Empresa {empresa.cnpj} não possui certificado cadastrado e não há DfeSetting global.'
+            f'Empresa {empresa.cnpj} não possui certificado próprio e o '
+            f'certificado do contador não está configurado.'
         )
-    return setting.cert_path, setting.cert_password, setting.ver_aplic
+
+    if setting.cert_pfx and setting.cert_password_encrypted:
+        return (
+            setting.cert_pfx.path,
+            setting.get_cert_password(),
+            setting.ver_aplic or 'NFCE-DJANGO-1.0',
+        )
+
+    if setting.cert_path and setting.cert_password:
+        return (
+            setting.cert_path,
+            setting.cert_password,
+            setting.ver_aplic or 'NFCE-DJANGO-1.0',
+        )
+
+    raise Exception(
+        f'Empresa {empresa.cnpj} não possui certificado próprio e o '
+        f'certificado do contador não está configurado.'
+    )
 
 
 MAX_LOTES_POR_CAPTURA = 200  # teto de segurança (200 * 50 = 10.000 docs)
@@ -180,9 +254,18 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
     qtDfeRet<50, NSU sem avanço, ou no teto max_lotes.
     """
     empresa = Empresa.objects.get(cnpj=cnpj)
-    cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
-
     state, _ = DfeSyncState.objects.get_or_create(empresa=empresa)
+
+    # Resolução de certificado: falha aqui é de configuração (sem cert / senha
+    # não decriptável) — trata como permanente, registra e sai sem chamar o WS.
+    try:
+        cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
+    except Exception as exc:
+        return _finalizar_com_erro(
+            state, cnpj, str(exc), transitorio=False,
+            parou_por='erro_certificado',
+            nsu_inicial=state.ultimo_nsu_sc,
+        )
 
     lotes = []
     total_docs = 0
@@ -190,6 +273,8 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
     ultimo_cstat = None
     ultimo_motivo = None
     parou_por = 'sem_mais_documentos'
+    erro = None
+    erro_transitorio = False
 
     for i in range(max_lotes):
         nsu_antes = state.ultimo_nsu_sc
@@ -200,15 +285,39 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
             ver_aplic=ver_aplic,
         )
 
-        response_xml = enviar_requisicao(
-            xml_dist=xml_dist,
-            cert_pfx_path=cert_path,
-            cert_password=cert_password,
-        )
-
-        root = _safe_fromstring(response_xml)
+        # Comunicação + parsing da resposta. Falhas aqui param a captura
+        # graciosamente, preservando o NSU já avançado nas iterações anteriores.
+        try:
+            response_xml = enviar_requisicao(
+                xml_dist=xml_dist,
+                cert_pfx_path=cert_path,
+                cert_password=cert_password,
+            )
+            root = _safe_fromstring(response_xml)
+        except SefazPermanenteError as exc:
+            erro, erro_transitorio = str(exc), False
+            parou_por = 'erro_permanente'
+            break
+        except SefazTransitorioError as exc:
+            erro, erro_transitorio = str(exc), True
+            parou_por = 'erro_transitorio'
+            break
+        except etree.XMLSyntaxError as exc:
+            # Resposta ilegível (página de erro de gateway, HTML, etc.) — transitório.
+            erro = f'Resposta da SEFAZ-SC ilegível (XML inválido): {exc}'
+            erro_transitorio = True
+            parou_por = 'resposta_invalida'
+            break
 
         cstat = extrair_texto(root, 'cStat')
+
+        # Sem cStat = corpo inesperado (possível SOAP Fault). Não avança às cegas.
+        if cstat is None:
+            erro = 'Resposta da SEFAZ-SC sem cStat (possível SOAP Fault).'
+            erro_transitorio = True
+            parou_por = 'resposta_sem_cstat'
+            break
+
         xmotivo = extrair_texto(root, 'xMotivo')
         ult_nsu_ret = extrair_texto(root, 'ultNuNSURet')
         qt_dfe_ret = extrair_texto(root, 'qtDfeRet')
@@ -224,9 +333,19 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
         if ult_nsu_ret:
             state.ultimo_nsu_sc = int(ult_nsu_ret)
 
+        # Persistência do lote: erro de gravação aqui é tratado como transitório
+        # (lock SMB, disco) e não deve avançar o NSU sem ter salvo os documentos.
         if cstat == '118' and lote_dist_comp:
-            lote_xml = descompactar_lote(lote_dist_comp)
-            persistir_lote(empresa, lote_xml)
+            try:
+                lote_xml = descompactar_lote(lote_dist_comp)
+                persistir_lote(empresa, lote_xml)
+            except Exception as exc:
+                # Reverte o avanço de NSU desta iteração para reprocessar depois.
+                state.ultimo_nsu_sc = nsu_antes
+                erro = f'Falha ao salvar o lote (NSU {nsu_antes}): {exc}'
+                erro_transitorio = True
+                parou_por = 'erro_persistencia'
+                break
 
         lotes.append({
             'iteracao': i + 1,
@@ -258,13 +377,34 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
     else:
         parou_por = 'limite_max_lotes'
 
-    # Agendamento da próxima captura automática (mantém comportamento anterior).
-    if ultimo_cstat == '110':
-        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=1)
-    elif ultimo_cstat == '117':
-        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=12)
-    elif ultimo_cstat == '118':
-        state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=12)
+    if erro:
+        # Mantém o que já foi capturado nesta rodada, mas registra a falha e
+        # agenda re-tentativa proporcional ao tipo de erro.
+        minutos = RETRY_TRANSITORIO_MIN if erro_transitorio else RETRY_PERMANENTE_MIN
+        state.ultimo_erro = erro
+        state.ultimo_erro_em = timezone.now()
+        state.proxima_captura_em = timezone.now() + timezone.timedelta(minutes=minutos)
+        state.save()
+        return {
+            'cnpj': cnpj,
+            'cstat': ultimo_cstat,
+            'xmotivo': ultimo_motivo,
+            'ult_nsu': state.ultimo_nsu_sc,
+            'nsu_inicial': nsu_inicial,
+            'qt_dfe_ret': total_docs,
+            'lotes': lotes,
+            'parou_por': parou_por,
+            'erro': erro,
+            'erro_transitorio': erro_transitorio,
+        }
+
+    # Sucesso — limpa erro anterior e SEMPRE agenda a próxima captura.
+    # Crítico contra consumo indevido: qualquer cStat não previsto cai no
+    # fallback seguro (>=1h), para que nenhum CNPJ fique "devido" para sempre
+    # e seja re-consultado a cada ciclo do worker.
+    state.ultimo_erro = ''
+    state.ultimo_erro_em = None
+    state.proxima_captura_em = timezone.now() + _intervalo_proxima(ultimo_cstat)
 
     state.save()
 
@@ -277,6 +417,28 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
         'qt_dfe_ret': total_docs,
         'lotes': lotes,
         'parou_por': parou_por,
+        'erro': None,
+    }
+
+
+def _finalizar_com_erro(state, cnpj, mensagem, transitorio, parou_por, nsu_inicial):
+    """Registra uma falha pré-loop no estado e devolve o dict de resultado padrão."""
+    minutos = RETRY_TRANSITORIO_MIN if transitorio else RETRY_PERMANENTE_MIN
+    state.ultimo_erro = mensagem
+    state.ultimo_erro_em = timezone.now()
+    state.proxima_captura_em = timezone.now() + timezone.timedelta(minutes=minutos)
+    state.save()
+    return {
+        'cnpj': cnpj,
+        'cstat': None,
+        'xmotivo': None,
+        'ult_nsu': state.ultimo_nsu_sc,
+        'nsu_inicial': nsu_inicial,
+        'qt_dfe_ret': 0,
+        'lotes': [],
+        'parou_por': parou_por,
+        'erro': mensagem,
+        'erro_transitorio': transitorio,
     }
 
 
@@ -338,8 +500,44 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
     if not docs:
         return
 
-    # Etapa 2 — agrupa por zip e escreve em batch (com retry).
-    # Pula a escrita se NFCE_XML_ROOT não estiver configurado.
+    # Etapa 2 — DB primeiro, dentro de uma transação atômica.
+    # O ZIP só é gravado depois, quando o DB já confirmou. Assim:
+    #   - Se o DB falhar → transação reverte, ZIP intocado, lote re-processável.
+    #   - Se o ZIP falhar após o DB → registros existem no banco sem arquivo físico
+    #     (leitura de XML retorna vazio, mas sem perda de rastreabilidade nem duplicata).
+    cancelamentos = []
+    with transaction.atomic():
+        for d in docs:
+            NfceDocumento.objects.update_or_create(
+                empresa=empresa,
+                chave_acesso=d['chave'],
+                nsu=d['nsu'],
+                defaults={
+                    'tipo_documento': d['tipo'],
+                    'arquivo_zip': str(d['arquivo_zip']) if d['arquivo_zip'] else '',
+                    'arquivo_entrada': d['entrada'],
+                    'emitido_em': d['emitido_em'],
+                    'numero_nfce': d['numero_nfce'],
+                    'serie': d['serie'],
+                    'valor_total': d['valor_total'],
+                    'cancelada': False,
+                }
+            )
+            if d['tipo'] == 'EVENTO_CANCELAMENTO':
+                cancelamentos.append(d['chave'])
+
+        if cancelamentos:
+            NfceDocumento.objects.filter(
+                empresa=empresa,
+                chave_acesso__in=cancelamentos,
+                tipo_documento='NFE_PROC',
+            ).update(
+                cancelada=True,
+                cancelamento_verificado_em=timezone.now(),
+            )
+
+    # Etapa 3 — ZIP gravado apenas após o DB ter confirmado.
+    # Pula se NFCE_XML_ROOT não estiver configurado.
     if getattr(settings, 'NFCE_XML_ROOT', None):
         grupos = {}
         for d in docs:
@@ -348,38 +546,7 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
             grupos[chave_grupo]['entradas'].append((d['entrada'], d['xml']))
 
         for g in grupos.values():
-            _gravar_zip_com_retry(g['zip'], g['pasta'], g['entradas'])
-
-    # Etapa 3 — comita as linhas no DB.
-    cancelamentos = []  # chaves cujas NFC-e precisam ser marcadas como canceladas
-    for d in docs:
-        NfceDocumento.objects.update_or_create(
-            empresa=empresa,
-            chave_acesso=d['chave'],
-            nsu=d['nsu'],
-            defaults={
-                'tipo_documento': d['tipo'],
-                'arquivo_zip': str(d['arquivo_zip']) if d['arquivo_zip'] else '',
-                'arquivo_entrada': d['entrada'],
-                'emitido_em': d['emitido_em'],
-                'numero_nfce': d['numero_nfce'],
-                'serie': d['serie'],
-                'valor_total': d['valor_total'],
-                'cancelada': False,
-            }
-        )
-        if d['tipo'] == 'EVENTO_CANCELAMENTO':
-            cancelamentos.append(d['chave'])
-
-    if cancelamentos:
-        NfceDocumento.objects.filter(
-            empresa=empresa,
-            chave_acesso__in=cancelamentos,
-            tipo_documento='NFE_PROC',
-        ).update(
-            cancelada=True,
-            cancelamento_verificado_em=timezone.now(),
-        )
+            _gravar_zip_sem_duplicata(g['zip'], g['pasta'], g['entradas'])
 
 
 def extrair_chave_do_xml(xml: str):
@@ -426,13 +593,29 @@ def resync_sc_para_cnpj(cnpj: str):
         ver_aplic=ver_aplic,
     )
 
-    response_xml = enviar_requisicao(
-        xml_dist=xml_dist,
-        cert_pfx_path=cert_path,
-        cert_password=cert_password,
-    )
-
-    root = _safe_fromstring(response_xml)
+    try:
+        response_xml = enviar_requisicao(
+            xml_dist=xml_dist,
+            cert_pfx_path=cert_path,
+            cert_password=cert_password,
+        )
+        root = _safe_fromstring(response_xml)
+    except (SefazError, etree.XMLSyntaxError) as exc:
+        transitorio = not isinstance(exc, SefazPermanenteError)
+        minutos = RETRY_TRANSITORIO_MIN if transitorio else RETRY_PERMANENTE_MIN
+        state.ultimo_erro = f'Resync: {exc}'
+        state.ultimo_erro_em = timezone.now()
+        state.proxima_captura_em = timezone.now() + timezone.timedelta(minutes=minutos)
+        state.save()
+        return {
+            'cnpj': cnpj,
+            'tipo': 'resync',
+            'status': 'ERRO',
+            'erro': str(exc),
+            'erro_transitorio': transitorio,
+            'nsu_original': nsu_original,
+            'resync_nsu_inicial': nsu_resync,
+        }
 
     cstat = extrair_texto(root, 'cStat')
     xmotivo = extrair_texto(root, 'xMotivo')
@@ -493,10 +676,23 @@ def verificar_cancelamentos_sc_pendentes():
     resultados = []
 
     for doc in documentos:
-        resultado = consultar_documento_por_chave(
-            doc.empresa.cnpj,
-            doc.chave_acesso
-        )
+        # Falha de comunicação interrompe a rodada: não marca como verificado
+        # (para reprocessar depois) e evita martelar um serviço instável/fora do ar.
+        try:
+            resultado = consultar_documento_por_chave(
+                doc.empresa.cnpj,
+                doc.chave_acesso
+            )
+        except (SefazError, etree.XMLSyntaxError) as exc:
+            logger.warning(
+                'Verificação de cancelamento interrompida na chave %s: %s',
+                doc.chave_acesso, exc,
+            )
+            resultados.append({
+                'chave_acesso': doc.chave_acesso,
+                'erro': str(exc),
+            })
+            break
 
         if resultado.get('cancelada'):
             doc.cancelada = True

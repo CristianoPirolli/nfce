@@ -7,14 +7,35 @@
         <h1 style="margin-bottom:4px;">{{ empresa.razao_social }}</h1>
         <div style="color:#6b7280;">CNPJ {{ empresa.cnpj }}</div>
         {% if state %}
+            <div style="margin-top:8px;">
+                <span class="badge {% if captura_status.code == 'executando' %}badge-info{% elif captura_status.code == 'fila' %}badge-warn{% elif captura_status.code == 'bloqueado' %}badge-err{% elif captura_status.code == 'em_dia' %}badge-ok{% else %}badge-info{% endif %}">
+                    {{ captura_status.label }}
+                </span>
+                {% if captura_status.code == 'bloqueado' or captura_status.code == 'em_dia' %}
+                    {% if captura_liberada_em %}<span style="color:#6b7280; font-size:12px;">até {{ captura_liberada_em }}</span>{% endif %}
+                {% endif %}
+            </div>
             <div style="margin-top:8px; font-size:13px;">
                 NSU atual: <strong>{{ state.ultimo_nsu_sc }}</strong> ·
                 Última captura: {{ state.ultima_captura|default:"—" }} ·
                 cStat: <span class="badge badge-info">{{ state.ultimo_cstat|default:"—" }}</span>
                 {% if state.ultimo_motivo %} <span style="color:#6b7280;">— {{ state.ultimo_motivo }}</span>{% endif %}
             </div>
+            {% if state.ultimo_erro %}
+            <div class="badge badge-err" style="margin-top:8px; display:inline-block; max-width:560px; white-space:normal; line-height:1.4;">
+                ⚠ Última falha{% if state.ultimo_erro_em %} em {{ state.ultimo_erro_em }}{% endif %}: {{ state.ultimo_erro }}
+            </div>
+            {% endif %}
         {% endif %}
     </div>
+    {% if captura_liberada_em %}
+    <span class="captura-wrap" data-liberada-em="{{ captura_liberada_em|date:'c' }}">
+        <button type="button" class="btn btn-primary" disabled>⟳ Capturar agora</button>
+        <span class="captura-tip">
+            Aguarde <span class="captura-restante">…</span> para capturar novamente
+        </span>
+    </span>
+    {% else %}
     <form method="post" action="{% url 'dfe:consulta_capturar' empresa.id %}">
         {% csrf_token %}
         <button type="submit" class="btn btn-primary"
@@ -22,7 +43,56 @@
             ⟳ Capturar agora
         </button>
     </form>
+    {% endif %}
 </div>
+
+<style>
+    .captura-wrap { position: relative; display: inline-block; }
+    .captura-wrap .btn[disabled] { cursor: not-allowed; opacity: .55; }
+    .captura-tip {
+        position: absolute; top: 100%; right: 0; margin-top: 6px;
+        background: #1f2937; color: #fff; padding: 6px 10px; border-radius: 6px;
+        font-size: 12px; white-space: nowrap; opacity: 0; pointer-events: none;
+        transition: opacity .12s ease; z-index: 10;
+        box-shadow: 0 4px 12px rgba(0,0,0,.15);
+    }
+    .captura-wrap:hover .captura-tip { opacity: 1; }
+</style>
+
+<script>
+    (function () {
+        var wrap = document.querySelector('.captura-wrap[data-liberada-em]');
+        if (!wrap) return;
+        var alvo = new Date(wrap.getAttribute('data-liberada-em')).getTime();
+        var span = wrap.querySelector('.captura-restante');
+
+        function formatar(ms) {
+            if (ms <= 0) return '0s';
+            var s = Math.floor(ms / 1000);
+            var h = Math.floor(s / 3600); s -= h * 3600;
+            var m = Math.floor(s / 60); s -= m * 60;
+            var partes = [];
+            if (h) partes.push(h + 'h');
+            if (m || h) partes.push(m + 'min');
+            partes.push(s + 's');
+            return partes.join(' ');
+        }
+
+        function tick() {
+            var resta = alvo - Date.now();
+            if (resta <= 0) { window.location.reload(); return; }
+            span.textContent = formatar(resta);
+        }
+
+        tick();
+        setInterval(tick, 1000);
+    })();
+</script>
+
+{% if captura_status.refresh %}
+{# Enquanto a captura está em andamento ou na fila, recarrega para refletir o progresso. #}
+<script>setTimeout(function () { window.location.reload(); }, 10000);</script>
+{% endif %}
 
 {% if ultima_captura %}
 <div class="card" style="margin-bottom:16px;">

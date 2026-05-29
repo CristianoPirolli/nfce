@@ -232,3 +232,7 @@ debug_response_soap.xml
 
 #debug
 *.xml
+
+
+#docs
+docs/

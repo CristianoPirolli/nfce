@@ -10,6 +10,7 @@
             <th>Razão social</th>
             <th>CNPJ</th>
             <th>Certificado</th>
+            <th>Status</th>
             <th></th>
         </tr>
     </thead>
@@ -19,16 +20,21 @@
             <td>{{ empresa.razao_social }}</td>
             <td>{{ empresa.cnpj }}</td>
             <td>
-                {% if empresa.cert_pfx %}
+                {% if empresa.cert_ok %}
                     <span class="badge badge-ok">OK</span>
                 {% else %}
                     <span class="badge badge-warn">Pendente</span>
                 {% endif %}
             </td>
+            <td>
+                <span class="badge {% if empresa.status.code == 'executando' %}badge-info{% elif empresa.status.code == 'fila' %}badge-warn{% elif empresa.status.code == 'bloqueado' %}badge-err{% elif empresa.status.code == 'em_dia' %}badge-ok{% else %}badge-info{% endif %}">
+                    {{ empresa.status.label }}
+                </span>
+            </td>
             <td><a class="btn btn-primary btn-sm" href="{% url 'dfe:consulta_empresa' empresa.id %}">Abrir</a></td>
         </tr>
     {% empty %}
-        <tr><td colspan="4" style="text-align:center; padding:24px;">Nenhuma empresa ativa.</td></tr>
+        <tr><td colspan="5" style="text-align:center; padding:24px;">Nenhuma empresa ativa.</td></tr>
     {% endfor %}
     </tbody>
 </table>

@@ -3,8 +3,19 @@
 {% block content %}
 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
     <h1>Certificados por empresa</h1>
-    <a href="{% url 'dfe:nova_empresa' %}" class="btn btn-primary">+ Nova empresa</a>
+    <div class="actions">
+        <a href="{% url 'dfe:certificado_contador' %}" class="btn btn-secondary">Certificado do contador</a>
+        <a href="{% url 'dfe:nova_empresa' %}" class="btn btn-primary">+ Nova empresa</a>
+    </div>
 </div>
+
+{% if not contador_ok %}
+<div class="card" style="background:#fef3c7; color:#92400e; margin-bottom:16px;">
+    Nenhum certificado do contador configurado.
+    <a href="{% url 'dfe:certificado_contador' %}">Configure agora</a>
+    para que as empresas possam capturar sem certificado próprio.
+</div>
+{% endif %}
 
 <table>
     <thead>
@@ -24,7 +35,9 @@
             <td>{{ empresa.cnpj }}</td>
             <td>
                 {% if empresa.cert_pfx %}
-                    <span class="badge badge-ok">Cadastrado</span>
+                    <span class="badge badge-ok">Próprio</span>
+                {% elif contador_ok %}
+                    <span class="badge badge-info">Contador</span>
                 {% else %}
                     <span class="badge badge-warn">Pendente</span>
                 {% endif %}
@@ -33,7 +46,7 @@
             <td>{{ empresa.cert_cnpj_titular|default:"—" }}</td>
             <td class="actions">
                 <a class="btn btn-secondary" href="{% url 'dfe:upload_certificado' empresa.id %}">
-                    {% if empresa.cert_pfx %}Substituir{% else %}Enviar{% endif %}
+                    {% if empresa.cert_pfx %}Substituir{% else %}Cert. próprio{% endif %}
                 </a>
                 {% if empresa.cert_pfx %}
                 <form method="post" action="{% url 'dfe:remover_certificado' empresa.id %}"

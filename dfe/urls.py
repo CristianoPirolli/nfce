@@ -8,6 +8,7 @@ app_name = 'dfe'
 urlpatterns = [
     # Certificados
     path('certificados/', views.lista_empresas, name='lista_empresas'),
+    path('certificados/contador/', views.certificado_contador, name='certificado_contador'),
     path('certificados/nova/', views.nova_empresa, name='nova_empresa'),
     path('certificados/<int:empresa_id>/upload/', views.upload_certificado, name='upload_certificado'),
     path('certificados/<int:empresa_id>/remover/', views.remover_certificado, name='remover_certificado'),

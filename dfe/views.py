@@ -6,7 +6,46 @@ from django.contrib import messages
 from django.core.paginator import Paginator
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 from lxml import etree
+
+
+def _captura_liberada_em(state):
+    """Datetime em que a captura volta a ser permitida, ou None se já liberada.
+
+    Considera tanto o bloqueio duro do SEFAZ (bloqueado_ate — cStat 657, consumo
+    indevido) quanto o agendamento suave (proxima_captura_em — cStat 110/117/118).
+    Retorna o mais distante dos dois que ainda esteja no futuro.
+    """
+    if not state:
+        return None
+    agora = timezone.now()
+    liberada_em = None
+    for ts in (state.bloqueado_ate, state.proxima_captura_em):
+        if ts and ts > agora and (liberada_em is None or ts > liberada_em):
+            liberada_em = ts
+    return liberada_em
+
+
+def _status_captura(state):
+    """Status agregado da captura para exibição. Retorna dict com:
+    code, label e refresh (se a página deve auto-recarregar enquanto pendente).
+    """
+    if not state:
+        return {'code': 'novo', 'label': 'Sem sincronização ainda', 'refresh': False}
+
+    agora = timezone.now()
+
+    if state.em_execucao:
+        return {'code': 'executando', 'label': '🔄 Capturando agora…', 'refresh': True}
+
+    if state.bloqueado_ate and state.bloqueado_ate > agora:
+        return {'code': 'bloqueado', 'label': '🔒 Bloqueado', 'refresh': False}
+
+    if state.proxima_captura_em is None or state.proxima_captura_em <= agora:
+        return {'code': 'fila', 'label': '⏳ Na fila', 'refresh': True}
+
+    return {'code': 'em_dia', 'label': '✓ Em dia', 'refresh': False}
 
 
 def _ler_xml(doc) -> str:
@@ -29,26 +68,82 @@ _SAFE_XML_PARSER = etree.XMLParser(
     load_dtd=False,
 )
 
-from .forms import CertificadoUploadForm, EmpresaForm
-from .models import Empresa, NfceDocumento
+from .forms import CertificadoContadorForm, CertificadoUploadForm, EmpresaForm
+from .models import DfeSetting, Empresa, NfceDocumento
+
+
+def _contador_cert_configurado() -> bool:
+    """True se há um certificado do contador utilizável (upload ou legado)."""
+    setting = DfeSetting.objects.first()
+    if not setting:
+        return False
+    if setting.cert_pfx and setting.cert_password_encrypted:
+        return True
+    return bool(setting.cert_path and setting.cert_password)
 
 
 def lista_empresas(request):
     empresas = Empresa.objects.order_by('razao_social')
-    return render(request, 'dfe/certificados/lista.html', {'empresas': empresas})
+    return render(request, 'dfe/certificados/lista.html', {
+        'empresas': empresas,
+        'contador_ok': _contador_cert_configurado(),
+    })
 
 
 def nova_empresa(request):
     if request.method == 'POST':
         form = EmpresaForm(request.POST)
         if form.is_valid():
-            empresa = form.save()
-            messages.success(request, 'Empresa cadastrada. Agora envie o certificado.')
-            return redirect('dfe:upload_certificado', empresa_id=empresa.id)
+            form.save()
+            if _contador_cert_configurado():
+                messages.success(
+                    request,
+                    'Empresa cadastrada. Ela usará o certificado do contador automaticamente.'
+                )
+            else:
+                messages.success(
+                    request,
+                    'Empresa cadastrada. Configure o certificado do contador para habilitar as capturas.'
+                )
+            return redirect('dfe:lista_empresas')
     else:
         form = EmpresaForm()
 
     return render(request, 'dfe/certificados/empresa_form.html', {'form': form})
+
+
+def certificado_contador(request):
+    setting = DfeSetting.objects.first()
+
+    if request.method == 'POST':
+        form = CertificadoContadorForm(request.POST, request.FILES)
+        if form.is_valid():
+            info = form.info_cert
+            if setting is None:
+                setting = DfeSetting()
+            if setting.cert_pfx:
+                setting.cert_pfx.delete(save=False)
+
+            setting.cert_pfx = form.cleaned_data['cert_pfx']
+            setting.set_cert_password(form.cleaned_data['cert_password'])
+            setting.cert_validade = info['nao_depois']
+            if info['cnpj_titular']:
+                setting.nfce_sc_cert_cnpj_contador = info['cnpj_titular']
+            setting.save()
+
+            messages.success(
+                request,
+                f"Certificado do contador válido até {info['nao_depois'].strftime('%d/%m/%Y')} salvo. "
+                f"Todas as empresas sem certificado próprio passarão a usá-lo."
+            )
+            return redirect('dfe:lista_empresas')
+    else:
+        form = CertificadoContadorForm()
+
+    return render(request, 'dfe/certificados/contador.html', {
+        'form': form,
+        'setting': setting,
+    })
 
 
 def upload_certificado(request, empresa_id):
@@ -123,7 +218,16 @@ def _resumo_nfce(doc: NfceDocumento) -> dict:
 
 
 def consulta_index(request):
-    empresas = Empresa.objects.filter(ativa=True).order_by('razao_social')
+    empresas = list(
+        Empresa.objects.filter(ativa=True)
+        .select_related('dfesyncstate')
+        .order_by('razao_social')
+    )
+    contador_ok = _contador_cert_configurado()
+    for empresa in empresas:
+        state = getattr(empresa, 'dfesyncstate', None)
+        empresa.status = _status_captura(state)
+        empresa.cert_ok = bool(empresa.cert_pfx) or contador_ok
     return render(request, 'dfe/consulta/index.html', {'empresas': empresas})
 
 
@@ -182,6 +286,8 @@ def consulta_empresa(request, empresa_id):
         'linhas': linhas,
         'page': page,
         'state': state,
+        'captura_liberada_em': _captura_liberada_em(state),
+        'captura_status': _status_captura(state),
         'ultima_captura': ultima_captura,
         'filtros': {
             'tipo': tipo, 'cancelada': cancelada, 'chave': chave,
@@ -195,39 +301,44 @@ def consulta_empresa(request, empresa_id):
 
 
 def consulta_capturar(request, empresa_id):
+    """Enfileira a captura (não-bloqueante). O worker em background processa.
+
+    A web nunca chama o SEFAZ: aqui só marcamos proxima_captura_em=agora para
+    que a empresa "fure a fila" e seja capturada no próximo ciclo do worker.
+    """
     empresa = get_object_or_404(Empresa, id=empresa_id)
     if request.method != 'POST':
         return redirect('dfe:consulta_empresa', empresa_id=empresa.id)
 
-    if not empresa.cert_pfx:
-        messages.error(request, 'Empresa sem certificado cadastrado.')
+    if not empresa.cert_pfx and not _contador_cert_configurado():
+        messages.error(
+            request,
+            'Sem certificado disponível. Cadastre o certificado do contador ou um certificado próprio.'
+        )
         return redirect('dfe:consulta_empresa', empresa_id=empresa.id)
 
-    from .services.sefaz_sc_capture import capturar_sc_para_cnpj
-    try:
-        resultado = capturar_sc_para_cnpj(empresa.cnpj)
-    except Exception as exc:
-        messages.error(request, f'Falha na captura: {exc}')
+    from .models import DfeSyncState
+    state, _ = DfeSyncState.objects.get_or_create(empresa=empresa)
+
+    if state.em_execucao:
+        messages.info(request, 'Captura já em andamento para esta empresa.')
         return redirect('dfe:consulta_empresa', empresa_id=empresa.id)
 
-    lotes = resultado.get('lotes') or []
-    messages.success(
-        request,
-        f"Captura concluída — {len(lotes)} lote(s), {resultado.get('qt_dfe_ret') or 0} documento(s). "
-        f"NSU {resultado.get('nsu_inicial')} → {resultado.get('ult_nsu')}. "
-        f"cStat final {resultado.get('cstat')}: {resultado.get('xmotivo')} "
-        f"(parou por: {resultado.get('parou_por')})."
-    )
-    request.session['ultima_captura'] = {
-        'empresa_id': empresa.id,
-        'lotes': lotes,
-        'parou_por': resultado.get('parou_por'),
-        'cstat': resultado.get('cstat'),
-        'xmotivo': resultado.get('xmotivo'),
-        'nsu_inicial': resultado.get('nsu_inicial'),
-        'ult_nsu': resultado.get('ult_nsu'),
-        'qt_dfe_ret': resultado.get('qt_dfe_ret'),
-    }
+    liberada_em = _captura_liberada_em(state)
+    if liberada_em:
+        messages.warning(
+            request,
+            f'Captura bloqueada até {timezone.localtime(liberada_em):%d/%m/%Y %H:%M} '
+            f'(proteção contra consumo indevido do SEFAZ).'
+        )
+        return redirect('dfe:consulta_empresa', empresa_id=empresa.id)
+
+    state.proxima_captura_em = timezone.now()
+    state.ultimo_erro = ''
+    state.ultimo_erro_em = None
+    state.save(update_fields=['proxima_captura_em', 'ultimo_erro', 'ultimo_erro_em'])
+
+    messages.success(request, 'Captura agendada — será processada em instantes pelo worker.')
     return redirect('dfe:consulta_empresa', empresa_id=empresa.id)
 
 
