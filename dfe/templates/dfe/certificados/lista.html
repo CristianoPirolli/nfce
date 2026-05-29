@@ -52,9 +52,10 @@
                 <form method="post" action="{% url 'dfe:remover_certificado' empresa.id %}"
                       onsubmit="return confirm('Remover o certificado desta empresa?');">
                     {% csrf_token %}
-                    <button type="submit" class="btn btn-danger">Remover</button>
+                    <button type="submit" class="btn btn-danger">Remover cert.</button>
                 </form>
                 {% endif %}
+                <a class="btn btn-danger" href="{% url 'dfe:remover_empresa' empresa.id %}">Excluir empresa</a>
             </td>
         </tr>
     {% empty %}

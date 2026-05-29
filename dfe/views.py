@@ -1,5 +1,5 @@
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from django.contrib import messages
@@ -68,8 +68,9 @@ _SAFE_XML_PARSER = etree.XMLParser(
     load_dtd=False,
 )
 
+from django.db.models import Count, Q
 from .forms import CertificadoContadorForm, CertificadoUploadForm, EmpresaForm
-from .models import DfeSetting, Empresa, NfceDocumento
+from .models import DfeSetting, Empresa, NfceDocumento, CapturaHistorico
 
 
 def _contador_cert_configurado() -> bool:
@@ -190,6 +191,24 @@ def remover_certificado(request, empresa_id):
     return redirect('dfe:lista_empresas')
 
 
+def remover_empresa(request, empresa_id):
+    empresa = get_object_or_404(Empresa, id=empresa_id)
+    if request.method == 'POST':
+        nome = empresa.razao_social
+        if empresa.cert_pfx:
+            empresa.cert_pfx.delete(save=False)
+        empresa.delete()
+        messages.success(
+            request,
+            f'Empresa "{nome}" e todos os seus dados foram excluídos.'
+        )
+        return redirect('dfe:lista_empresas')
+
+    return render(request, 'dfe/certificados/remover_empresa.html', {
+        'empresa': empresa,
+    })
+
+
 def _resumo_nfce(doc: NfceDocumento) -> dict:
     """Extrai número, série, valor e data de emissão do XML para exibição."""
     out = {'numero': '', 'serie': '', 'valor': '', 'emitido_em': ''}
@@ -223,12 +242,45 @@ def consulta_index(request):
         .select_related('dfesyncstate')
         .order_by('razao_social')
     )
+    
+    # Totais globais (todas as empresas ativas)
+    global_stats = NfceDocumento.objects.filter(
+        empresa__ativa=True
+    ).exclude(
+        tipo_documento='EVENTO_CANCELAMENTO'
+    ).aggregate(
+        total_vigentes=Count('id', filter=Q(cancelada=False)),
+        total_canceladas=Count('id', filter=Q(cancelada=True))
+    )
+
     contador_ok = _contador_cert_configurado()
     for empresa in empresas:
         state = getattr(empresa, 'dfesyncstate', None)
         empresa.status = _status_captura(state)
         empresa.cert_ok = bool(empresa.cert_pfx) or contador_ok
-    return render(request, 'dfe/consulta/index.html', {'empresas': empresas})
+    
+    return render(request, 'dfe/consulta/index.html', {
+        'empresas': empresas,
+        'global_stats': global_stats
+    })
+
+
+def historico_capturas(request):
+    """Exibe o histórico de todas as execuções de captura das últimas 24 horas."""
+    limite = timezone.now() - timedelta(hours=24)
+    qs = CapturaHistorico.objects.filter(inicio__gte=limite).select_related('empresa').order_by('-inicio')
+    
+    empresa_nome = request.GET.get('empresa', '').strip()
+    if empresa_nome:
+        qs = qs.filter(empresa__razao_social__icontains=empresa_nome)
+        
+    paginator = Paginator(qs, 50)
+    page = paginator.get_page(request.GET.get('page'))
+    
+    return render(request, 'dfe/consulta/historico.html', {
+        'page': page,
+        'empresa_nome': empresa_nome,
+    })
 
 
 def consulta_empresa(request, empresa_id):
@@ -268,6 +320,24 @@ def consulta_empresa(request, empresa_id):
         except ValueError:
             pass
 
+    # Counters based on the FILTERS (excluding the cancelada filter itself)
+    qs_counters = NfceDocumento.objects.filter(empresa=empresa).exclude(tipo_documento='EVENTO_CANCELAMENTO')
+    if tipo: qs_counters = qs_counters.filter(tipo_documento=tipo)
+    if chave: qs_counters = qs_counters.filter(chave_acesso__icontains=chave)
+    if inicio:
+        try:
+            qs_counters = qs_counters.filter(emitido_em__date__gte=datetime.strptime(inicio, '%Y-%m-%d').date())
+        except ValueError: pass
+    if fim:
+        try:
+            qs_counters = qs_counters.filter(emitido_em__date__lte=datetime.strptime(fim, '%Y-%m-%d').date())
+        except ValueError: pass
+
+    stats = qs_counters.aggregate(
+        vigentes=Count('id', filter=Q(cancelada=False)),
+        canceladas=Count('id', filter=Q(cancelada=True))
+    )
+
     paginator = Paginator(qs, 50)
     page = paginator.get_page(request.GET.get('page'))
 
@@ -286,6 +356,7 @@ def consulta_empresa(request, empresa_id):
         'linhas': linhas,
         'page': page,
         'state': state,
+        'stats': stats,
         'captura_liberada_em': _captura_liberada_em(state),
         'captura_status': _status_captura(state),
         'ultima_captura': ultima_captura,

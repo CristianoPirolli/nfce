@@ -166,8 +166,10 @@
     <a href="{% url 'dfe:consulta_empresa' empresa.id %}" class="btn btn-secondary">Limpar</a>
 </form>
 
-<div style="margin:12px 0; color:#6b7280; font-size:13px;">
-    {{ page.paginator.count }} documento(s) encontrado(s).
+<div style="margin:12px 0; display:flex; gap:16px; align-items:center;">
+    <span style="color:#6b7280; font-size:13px;">{{ page.paginator.count }} documento(s) encontrado(s).</span>
+    <span class="badge badge-ok">Vigentes: {{ stats.vigentes }}</span>
+    <span class="badge badge-err">Canceladas: {{ stats.canceladas }}</span>
 </div>
 
 <table>

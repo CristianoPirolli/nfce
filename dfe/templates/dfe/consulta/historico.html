@@ -1,0 +1,83 @@
+{% extends 'dfe/base.html' %}
+{% block title %}Histórico de Capturas{% endblock %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:24px;">
+    <div style="display:flex; align-items:baseline; gap:16px;">
+        <h1 style="margin:0;">Histórico de Capturas</h1>
+        <span class="badge badge-info">Últimas 24 horas</span>
+    </div>
+    <a href="{% url 'dfe:consulta_index' %}" class="btn btn-secondary btn-sm">← Voltar</a>
+</div>
+
+<form method="get" class="card filters" style="margin-bottom:24px;">
+    <div style="flex:1;">
+        <label>Filtrar por Empresa</label>
+        <input type="text" name="empresa" value="{{ empresa_nome }}" placeholder="Digite a razão social">
+    </div>
+    <button type="submit" class="btn btn-primary">Filtrar</button>
+    <a href="{% url 'dfe:historico_capturas' %}" class="btn btn-secondary">Limpar</a>
+</form>
+
+<table>
+    <thead>
+        <tr>
+            <th>Início</th>
+            <th>Fim</th>
+            <th>Empresa</th>
+            <th>NSU Inicial → Final</th>
+            <th style="text-align:center;">Vigentes</th>
+            <th style="text-align:center;">Canceladas</th>
+            <th>Status/Erro</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for h in page %}
+        <tr>
+            <td style="white-space:nowrap;">{{ h.inicio|date:"d/m/Y H:i:s" }}</td>
+            <td style="white-space:nowrap;">{{ h.fim|date:"H:i:s"|default:"—" }}</td>
+            <td><strong>{{ h.empresa.razao_social }}</strong></td>
+            <td>{{ h.nsu_inicial }} → {{ h.nsu_final }}</td>
+            <td style="text-align:center;">
+                {% if h.qt_vigentes > 0 %}
+                    <span class="badge badge-ok">+{{ h.qt_vigentes }}</span>
+                {% else %}
+                    <span style="color:#9ca3af;">0</span>
+                {% endif %}
+            </td>
+            <td style="text-align:center;">
+                {% if h.qt_canceladas > 0 %}
+                    <span class="badge badge-err">+{{ h.qt_canceladas }}</span>
+                {% else %}
+                    <span style="color:#9ca3af;">0</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if h.erro %}
+                    <span class="badge badge-err" title="{{ h.erro }}">Erro</span>
+                    <small style="color:#ef4444; display:block; font-size:11px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ h.erro }}</small>
+                {% elif h.cstat %}
+                    <span class="badge {% if h.cstat == '118' or h.cstat == '117' %}badge-ok{% else %}badge-info{% endif %}">{{ h.cstat }}</span>
+                    <small style="color:#6b7280; display:block; font-size:11px;">{{ h.xmotivo }}</small>
+                {% else %}
+                    <span class="badge badge-info">Processando...</span>
+                {% endif %}
+            </td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="7" style="text-align:center; padding:24px;">Nenhum histórico encontrado.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if page.has_other_pages %}
+<div class="pagination">
+    {% if page.has_previous %}
+        <a class="btn btn-secondary btn-sm" href="?page={{ page.previous_page_number }}&empresa={{ empresa_nome }}">‹ Anterior</a>
+    {% endif %}
+    <span>Página {{ page.number }} de {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}
+        <a class="btn btn-secondary btn-sm" href="?page={{ page.next_page_number }}&empresa={{ empresa_nome }}">Próxima ›</a>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

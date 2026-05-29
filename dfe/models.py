@@ -168,3 +168,27 @@ class NfceDocumento(models.Model):
 
     def __str__(self):
         return self.chave_acesso
+
+
+class CapturaHistorico(models.Model):
+    """Log permanente de cada execução de captura realizada pelo worker."""
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
+    inicio = models.DateTimeField(auto_now_add=True)
+    fim = models.DateTimeField(null=True, blank=True)
+    
+    nsu_inicial = models.BigIntegerField(default=0)
+    nsu_final = models.BigIntegerField(default=0)
+    
+    # Contadores da rodada
+    qt_vigentes = models.IntegerField(default=0)
+    qt_canceladas = models.IntegerField(default=0)
+    
+    cstat = models.CharField(max_length=10, blank=True, null=True)
+    xmotivo = models.TextField(blank=True, null=True)
+    erro = models.TextField(blank=True, null=True)
+    
+    class Meta:
+        ordering = ['-inicio']
+
+    def __str__(self):
+        return f'{self.empresa.razao_social} - {self.inicio:%d/%m/%Y %H:%M}'

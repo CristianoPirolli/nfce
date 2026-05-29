@@ -157,7 +157,7 @@ def _extrair_dh_emi(xml_str: str):
     except ValueError:
         return None
 
-from dfe.models import Empresa, DfeSetting, DfeSyncState, NfceDocumento
+from dfe.models import Empresa, DfeSetting, DfeSyncState, NfceDocumento, CapturaHistorico
 from dfe.services.sefaz_sc_distribuicao_client import (
     build_xml_dist_nsu,
     build_xml_sol_dfe,
@@ -247,28 +247,35 @@ MAX_LOTES_POR_CAPTURA = 200  # teto de segurança (200 * 50 = 10.000 docs)
 
 
 def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
-    """Captura iterativamente todos os lotes disponíveis na SEF-SC.
-
-    O serviço retorna até 50 documentos por chamada (cStat=118). Continuamos
-    chamando enquanto a SEFAZ devolver lote cheio, parando em cStat≠118,
-    qtDfeRet<50, NSU sem avanço, ou no teto max_lotes.
-    """
+    """Captura iterativamente todos os lotes disponíveis na SEF-SC."""
     empresa = Empresa.objects.get(cnpj=cnpj)
     state, _ = DfeSyncState.objects.get_or_create(empresa=empresa)
+
+    # Inicia registro de histórico
+    historico = CapturaHistorico.objects.create(
+        empresa=empresa,
+        nsu_inicial=state.ultimo_nsu_sc
+    )
 
     # Resolução de certificado: falha aqui é de configuração (sem cert / senha
     # não decriptável) — trata como permanente, registra e sai sem chamar o WS.
     try:
         cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
     except Exception as exc:
-        return _finalizar_com_erro(
+        res = _finalizar_com_erro(
             state, cnpj, str(exc), transitorio=False,
             parou_por='erro_certificado',
             nsu_inicial=state.ultimo_nsu_sc,
         )
+        historico.fim = timezone.now()
+        historico.erro = str(exc)
+        historico.save()
+        return res
 
     lotes = []
     total_docs = 0
+    total_vigentes = 0
+    total_canceladas = 0
     nsu_inicial = state.ultimo_nsu_sc
     ultimo_cstat = None
     ultimo_motivo = None
@@ -338,7 +345,9 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
         if cstat == '118' and lote_dist_comp:
             try:
                 lote_xml = descompactar_lote(lote_dist_comp)
-                persistir_lote(empresa, lote_xml)
+                res_lote = persistir_lote(empresa, lote_xml)
+                total_vigentes += res_lote.get('novas_vigentes', 0)
+                total_canceladas += res_lote.get('novas_canceladas', 0)
             except Exception as exc:
                 # Reverte o avanço de NSU desta iteração para reprocessar depois.
                 state.ultimo_nsu_sc = nsu_antes
@@ -376,6 +385,16 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
             break
     else:
         parou_por = 'limite_max_lotes'
+
+    # Finaliza registro de histórico
+    historico.fim = timezone.now()
+    historico.nsu_final = state.ultimo_nsu_sc
+    historico.qt_vigentes = total_vigentes
+    historico.qt_canceladas = total_canceladas
+    historico.cstat = ultimo_cstat
+    historico.xmotivo = ultimo_motivo
+    historico.erro = erro
+    historico.save()
 
     if erro:
         # Mantém o que já foi capturado nesta rodada, mas registra a falha e
@@ -442,7 +461,7 @@ def _finalizar_com_erro(state, cnpj, mensagem, transitorio, parou_por, nsu_inici
     }
 
 
-def persistir_lote(empresa: Empresa, lote_xml: bytes):
+def persistir_lote(empresa: Empresa, lote_xml: bytes) -> dict:
     """Persiste todos os documentos de um lote agrupando escritas por .zip mensal.
 
     Estratégia: extrai todos os documentos do lote → agrupa por (pasta, arquivo_zip)
@@ -498,17 +517,14 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
         })
 
     if not docs:
-        return
+        return {'novas_vigentes': 0, 'novas_canceladas': 0}
 
     # Etapa 2 — DB primeiro, dentro de uma transação atômica.
-    # O ZIP só é gravado depois, quando o DB já confirmou. Assim:
-    #   - Se o DB falhar → transação reverte, ZIP intocado, lote re-processável.
-    #   - Se o ZIP falhar após o DB → registros existem no banco sem arquivo físico
-    #     (leitura de XML retorna vazio, mas sem perda de rastreabilidade nem duplicata).
     cancelamentos = []
+    novas_vigentes = 0
     with transaction.atomic():
         for d in docs:
-            NfceDocumento.objects.update_or_create(
+            obj, created = NfceDocumento.objects.update_or_create(
                 empresa=empresa,
                 chave_acesso=d['chave'],
                 nsu=d['nsu'],
@@ -523,21 +539,32 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
                     'cancelada': False,
                 }
             )
+            if created and d['tipo'] == 'NFE_PROC':
+                novas_vigentes += 1
+            
             if d['tipo'] == 'EVENTO_CANCELAMENTO':
                 cancelamentos.append(d['chave'])
 
+        novas_canceladas = 0
         if cancelamentos:
-            NfceDocumento.objects.filter(
+            # Marca como cancelada e conta quantas foram de fato alteradas para canceladas
+            # que antes eram vigentes.
+            novas_canceladas = NfceDocumento.objects.filter(
                 empresa=empresa,
                 chave_acesso__in=cancelamentos,
                 tipo_documento='NFE_PROC',
+                cancelada=False
             ).update(
                 cancelada=True,
                 cancelamento_verificado_em=timezone.now(),
             )
+            # Ajusta o contador de vigentes se uma nota que entrou agora como vigente
+            # também teve seu cancelamento no mesmo lote.
+            # (É raro mas possível se o lote trouxer NFe e logo depois o Evento)
+            # No entanto, o update_or_create acima já contou como vigente.
+            # Para simplificar, as canceladas são contadas separadamente.
 
-    # Etapa 3 — ZIP gravado apenas após o DB ter confirmado.
-    # Pula se NFCE_XML_ROOT não estiver configurado.
+    # Etapa 3 — ZIP...
     if getattr(settings, 'NFCE_XML_ROOT', None):
         grupos = {}
         for d in docs:
@@ -547,6 +574,8 @@ def persistir_lote(empresa: Empresa, lote_xml: bytes):
 
         for g in grupos.values():
             _gravar_zip_sem_duplicata(g['zip'], g['pasta'], g['entradas'])
+            
+    return {'novas_vigentes': novas_vigentes, 'novas_canceladas': novas_canceladas}
 
 
 def extrair_chave_do_xml(xml: str):

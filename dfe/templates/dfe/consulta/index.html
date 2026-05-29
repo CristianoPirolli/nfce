@@ -1,8 +1,17 @@
 {% extends 'dfe/base.html' %}
 {% block title %}Consulta NFC-e{% endblock %}
 {% block content %}
-<h1>Consulta de NFC-e</h1>
-<p style="color:#6b7280;">Selecione uma empresa para visualizar e capturar documentos.</p>
+<div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:16px;">
+    <div style="display:flex; align-items:baseline; gap:16px;">
+        <h1 style="margin:0;">Consulta de NFC-e</h1>
+        <div style="display:flex; gap:8px;">
+            <span class="badge badge-ok" style="font-size:14px; padding:4px 10px;">Vigentes: <strong>{{ global_stats.total_vigentes }}</strong></span>
+            <span class="badge badge-err" style="font-size:14px; padding:4px 10px;">Canceladas: <strong>{{ global_stats.total_canceladas }}</strong></span>
+        </div>
+    </div>
+    <a href="{% url 'dfe:historico_capturas' %}" class="btn btn-secondary btn-sm">📜 Histórico de Capturas</a>
+</div>
+<p style="color:#6b7280; margin-bottom:24px;">Selecione uma empresa para visualizar e capturar documentos.</p>
 
 <table>
     <thead>
