@@ -8,7 +8,7 @@
         <div style="color:#6b7280;">CNPJ {{ empresa.cnpj }}</div>
         {% if state %}
             <div style="margin-top:8px;">
-                <span class="badge {% if captura_status.code == 'executando' %}badge-info{% elif captura_status.code == 'fila' %}badge-warn{% elif captura_status.code == 'bloqueado' %}badge-err{% elif captura_status.code == 'em_dia' %}badge-ok{% else %}badge-info{% endif %}">
+                <span class="badge {% if captura_status.code == 'executando' %}badge-info{% elif captura_status.code == 'fila' %}badge-warn{% elif captura_status.code == 'bloqueado' %}badge-err{% elif captura_status.code == 'em_dia' %}badge-ok{% else %}badge-info{% endif %}" data-status-badge>
                     {{ captura_status.label }}
                 </span>
                 {% if captura_status.code == 'bloqueado' or captura_status.code == 'em_dia' %}
@@ -16,10 +16,10 @@
                 {% endif %}
             </div>
             <div style="margin-top:8px; font-size:13px;">
-                NSU atual: <strong>{{ state.ultimo_nsu_sc }}</strong> ·
-                Última captura: {{ state.ultima_captura|default:"—" }} ·
-                cStat: <span class="badge badge-info">{{ state.ultimo_cstat|default:"—" }}</span>
-                {% if state.ultimo_motivo %} <span style="color:#6b7280;">— {{ state.ultimo_motivo }}</span>{% endif %}
+                NSU atual: <strong data-state-nsu>{{ state.ultimo_nsu_sc }}</strong> ·
+                Última captura: <span data-state-ultima>{{ state.ultima_captura|default:"—" }}</span> ·
+                cStat: <span class="badge badge-info" data-state-cstat>{{ state.ultimo_cstat|default:"—" }}</span>
+                <span data-state-motivo style="color:#6b7280;">{% if state.ultimo_motivo %}— {{ state.ultimo_motivo }}{% endif %}</span>
             </div>
             {% if state.ultimo_erro %}
             <div class="badge badge-err" style="margin-top:8px; display:inline-block; max-width:560px; white-space:normal; line-height:1.4;">
@@ -89,10 +89,62 @@
     })();
 </script>
 
-{% if captura_status.refresh %}
-{# Enquanto a captura está em andamento ou na fila, recarrega para refletir o progresso. #}
-<script>setTimeout(function () { window.location.reload(); }, 10000);</script>
-{% endif %}
+<script>
+(function () {
+    var URL = "{% url 'dfe:status_empresa_json' empresa.id %}";
+    var INTERVALO_MS = 6000;
+    var CLASSES_BADGE = ['badge-info', 'badge-warn', 'badge-err', 'badge-ok'];
+    var CLASSE_POR_CODE = {
+        executando: 'badge-info',
+        fila: 'badge-warn',
+        bloqueado: 'badge-err',
+        em_dia: 'badge-ok',
+        novo: 'badge-info'
+    };
+    var ultimoNsu = null;
+    var nsuEl = document.querySelector('[data-state-nsu]');
+    if (nsuEl) ultimoNsu = nsuEl.textContent.trim();
+
+    function setText(sel, valor) {
+        var el = document.querySelector(sel);
+        if (el) el.textContent = valor;
+    }
+
+    function atualizar(data) {
+        var badge = document.querySelector('[data-status-badge]');
+        if (badge) {
+            badge.textContent = data.status.label;
+            CLASSES_BADGE.forEach(function (c) { badge.classList.remove(c); });
+            badge.classList.add(CLASSE_POR_CODE[data.status.code] || 'badge-info');
+        }
+        setText('[data-state-nsu]', data.state.ultimo_nsu_sc);
+        setText('[data-state-cstat]', data.state.ultimo_cstat || '—');
+        setText('[data-state-motivo]', data.state.ultimo_motivo ? '— ' + data.state.ultimo_motivo : '');
+        if (data.state.ultima_captura) {
+            var d = new Date(data.state.ultima_captura);
+            setText('[data-state-ultima]', d.toLocaleString('pt-BR'));
+        }
+        setText('[data-stats-vigentes]', data.stats.vigentes);
+        setText('[data-stats-canceladas]', data.stats.canceladas);
+
+        // Se o NSU avançou, recarrega para refletir novos documentos na lista.
+        var novoNsu = String(data.state.ultimo_nsu_sc);
+        if (ultimoNsu !== null && novoNsu !== ultimoNsu) {
+            window.location.reload();
+        }
+        ultimoNsu = novoNsu;
+    }
+
+    function tick() {
+        fetch(URL, { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) { if (data) atualizar(data); })
+            .catch(function () { /* ignora — próximo tick tenta */ });
+    }
+
+    setInterval(tick, INTERVALO_MS);
+})();
+</script>
 
 {% if ultima_captura %}
 <div class="card" style="margin-bottom:16px;">
@@ -168,8 +220,8 @@
 
 <div style="margin:12px 0; display:flex; gap:16px; align-items:center;">
     <span style="color:#6b7280; font-size:13px;">{{ page.paginator.count }} documento(s) encontrado(s).</span>
-    <span class="badge badge-ok">Vigentes: {{ stats.vigentes }}</span>
-    <span class="badge badge-err">Canceladas: {{ stats.canceladas }}</span>
+    <span class="badge badge-ok">Vigentes: <span data-stats-vigentes>{{ stats.vigentes }}</span></span>
+    <span class="badge badge-err">Canceladas: <span data-stats-canceladas>{{ stats.canceladas }}</span></span>
 </div>
 
 <table>

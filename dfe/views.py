@@ -4,7 +4,7 @@ from pathlib import Path
 
 from django.contrib import messages
 from django.core.paginator import Paginator
-from django.http import Http404, HttpResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from lxml import etree
@@ -262,6 +262,62 @@ def consulta_index(request):
     return render(request, 'dfe/consulta/index.html', {
         'empresas': empresas,
         'global_stats': global_stats
+    })
+
+
+def _status_json(state):
+    """Versão JSON-friendly de _status_captura: inclui liberada_em ISO."""
+    s = _status_captura(state)
+    liberada = _captura_liberada_em(state)
+    s['liberada_em'] = liberada.isoformat() if liberada else None
+    return s
+
+
+def status_index_json(request):
+    """Polling endpoint do index: totais globais + status por empresa."""
+    empresas = (
+        Empresa.objects.filter(ativa=True)
+        .select_related('dfesyncstate')
+        .order_by('razao_social')
+    )
+    global_stats = NfceDocumento.objects.filter(
+        empresa__ativa=True
+    ).exclude(
+        tipo_documento='EVENTO_CANCELAMENTO'
+    ).aggregate(
+        total_vigentes=Count('id', filter=Q(cancelada=False)),
+        total_canceladas=Count('id', filter=Q(cancelada=True))
+    )
+    data = {
+        'global_stats': global_stats,
+        'empresas': {
+            e.id: _status_json(getattr(e, 'dfesyncstate', None))
+            for e in empresas
+        },
+    }
+    return JsonResponse(data)
+
+
+def status_empresa_json(request, empresa_id):
+    """Polling endpoint da página da empresa: status, NSU, contadores."""
+    empresa = get_object_or_404(Empresa, id=empresa_id)
+    state = getattr(empresa, 'dfesyncstate', None)
+    stats = NfceDocumento.objects.filter(empresa=empresa).exclude(
+        tipo_documento='EVENTO_CANCELAMENTO'
+    ).aggregate(
+        vigentes=Count('id', filter=Q(cancelada=False)),
+        canceladas=Count('id', filter=Q(cancelada=True))
+    )
+    return JsonResponse({
+        'status': _status_json(state),
+        'stats': stats,
+        'state': {
+            'ultimo_nsu_sc': state.ultimo_nsu_sc if state else 0,
+            'ultima_captura': state.ultima_captura.isoformat() if state and state.ultima_captura else None,
+            'ultimo_cstat': (state.ultimo_cstat if state else '') or '',
+            'ultimo_motivo': (state.ultimo_motivo if state else '') or '',
+            'ultimo_erro': (state.ultimo_erro if state else '') or '',
+        },
     })
 
 

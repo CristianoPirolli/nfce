@@ -17,6 +17,8 @@ urlpatterns = [
     # Consulta de NFC-e
     path('consulta/', views.consulta_index, name='consulta_index'),
     path('consulta/historico/', views.historico_capturas, name='historico_capturas'),
+    path('consulta/status.json', views.status_index_json, name='status_index_json'),
+    path('consulta/<int:empresa_id>/status.json', views.status_empresa_json, name='status_empresa_json'),
     path('consulta/<int:empresa_id>/', views.consulta_empresa, name='consulta_empresa'),
     path('consulta/<int:empresa_id>/capturar/', views.consulta_capturar, name='consulta_capturar'),
     path('consulta/doc/<int:doc_id>/', views.consulta_documento, name='consulta_documento'),

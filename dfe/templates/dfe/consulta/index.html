@@ -5,8 +5,8 @@
     <div style="display:flex; align-items:baseline; gap:16px;">
         <h1 style="margin:0;">Consulta de NFC-e</h1>
         <div style="display:flex; gap:8px;">
-            <span class="badge badge-ok" style="font-size:14px; padding:4px 10px;">Vigentes: <strong>{{ global_stats.total_vigentes }}</strong></span>
-            <span class="badge badge-err" style="font-size:14px; padding:4px 10px;">Canceladas: <strong>{{ global_stats.total_canceladas }}</strong></span>
+            <span class="badge badge-ok" style="font-size:14px; padding:4px 10px;">Vigentes: <strong data-global-vigentes>{{ global_stats.total_vigentes }}</strong></span>
+            <span class="badge badge-err" style="font-size:14px; padding:4px 10px;">Canceladas: <strong data-global-canceladas>{{ global_stats.total_canceladas }}</strong></span>
         </div>
     </div>
     <a href="{% url 'dfe:historico_capturas' %}" class="btn btn-secondary btn-sm">📜 Histórico de Capturas</a>
@@ -25,7 +25,7 @@
     </thead>
     <tbody>
     {% for empresa in empresas %}
-        <tr>
+        <tr data-empresa-id="{{ empresa.id }}">
             <td>{{ empresa.razao_social }}</td>
             <td>{{ empresa.cnpj }}</td>
             <td>
@@ -36,7 +36,7 @@
                 {% endif %}
             </td>
             <td>
-                <span class="badge {% if empresa.status.code == 'executando' %}badge-info{% elif empresa.status.code == 'fila' %}badge-warn{% elif empresa.status.code == 'bloqueado' %}badge-err{% elif empresa.status.code == 'em_dia' %}badge-ok{% else %}badge-info{% endif %}">
+                <span class="badge status-badge {% if empresa.status.code == 'executando' %}badge-info{% elif empresa.status.code == 'fila' %}badge-warn{% elif empresa.status.code == 'bloqueado' %}badge-err{% elif empresa.status.code == 'em_dia' %}badge-ok{% else %}badge-info{% endif %}" data-status-badge>
                     {{ empresa.status.label }}
                 </span>
             </td>
@@ -47,4 +47,46 @@
     {% endfor %}
     </tbody>
 </table>
+
+<script>
+(function () {
+    var URL = "{% url 'dfe:status_index_json' %}";
+    var INTERVALO_MS = 8000;
+    var CLASSES_BADGE = ['badge-info', 'badge-warn', 'badge-err', 'badge-ok'];
+    var CLASSE_POR_CODE = {
+        executando: 'badge-info',
+        fila: 'badge-warn',
+        bloqueado: 'badge-err',
+        em_dia: 'badge-ok',
+        novo: 'badge-info'
+    };
+
+    function atualizar(data) {
+        var gv = document.querySelector('[data-global-vigentes]');
+        var gc = document.querySelector('[data-global-canceladas]');
+        if (gv) gv.textContent = data.global_stats.total_vigentes;
+        if (gc) gc.textContent = data.global_stats.total_canceladas;
+
+        Object.keys(data.empresas).forEach(function (id) {
+            var st = data.empresas[id];
+            var row = document.querySelector('tr[data-empresa-id="' + id + '"]');
+            if (!row) return;
+            var badge = row.querySelector('[data-status-badge]');
+            if (!badge) return;
+            badge.textContent = st.label;
+            CLASSES_BADGE.forEach(function (c) { badge.classList.remove(c); });
+            badge.classList.add(CLASSE_POR_CODE[st.code] || 'badge-info');
+        });
+    }
+
+    function tick() {
+        fetch(URL, { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) { if (data) atualizar(data); })
+            .catch(function () { /* silencioso — próximo tick tenta de novo */ });
+    }
+
+    setInterval(tick, INTERVALO_MS);
+})();
+</script>
 {% endblock %}
