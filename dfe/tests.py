@@ -14,6 +14,7 @@ from dfe.services.sefaz_sc_capture import (
 from dfe.services.worker_fila import (
     liberar_claim,
     states_devidos_captura,
+    states_devidos_resync,
     tentar_claim,
 )
 
@@ -123,6 +124,23 @@ class SelecaoDevidasTests(TestCase):
         pks = set(states_devidos_captura().values_list('pk', flat=True))
         self.assertEqual(pks, {ok.pk})
 
+    def test_resync_respeita_proxima_tentativa_apos_erro(self):
+        """Resync com retry futuro nao deve martelar o mesmo erro a cada ciclo."""
+        agora = timezone.now()
+        DfeSyncState.objects.create(
+            empresa=_empresa(cnpj='20000000000003'),
+            ultimo_resync_em=agora - timedelta(days=2),
+            proxima_captura_em=agora + timedelta(minutes=10),
+        )
+        ok = DfeSyncState.objects.create(
+            empresa=_empresa(cnpj='20000000000004'),
+            ultimo_resync_em=agora - timedelta(days=2),
+            proxima_captura_em=agora - timedelta(minutes=1),
+        )
+
+        pks = set(states_devidos_resync().values_list('pk', flat=True))
+        self.assertEqual(pks, {ok.pk})
+
 
 class AgendamentoFallbackTests(TestCase):
     def test_fallback_para_cstat_desconhecido(self):
@@ -203,12 +221,13 @@ class ZipPersistenciaTests(TestCase):
         state.refresh_from_db()
         self.assertEqual(resultado['status'], 'ERRO')
         self.assertIn('falha ao salvar o lote', resultado['erro'])
-        self.assertTrue(resultado['erro_transitorio'])
+        self.assertFalse(resultado['erro_transitorio'])
         self.assertEqual(state.ultimo_nsu_sc, 9)
         self.assertEqual(state.resync_nsu_inicial, 7)
         self.assertIn('falha ao salvar o lote', state.ultimo_erro)
         self.assertIsNotNone(state.ultimo_erro_em)
         self.assertIsNotNone(state.proxima_captura_em)
+        self.assertGreater(state.proxima_captura_em, timezone.now() + timedelta(minutes=55))
 
 
 class BotaoEnfileiraTests(TestCase):

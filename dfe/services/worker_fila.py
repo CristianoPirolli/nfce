@@ -63,11 +63,13 @@ def states_devidos_captura():
 
 def states_devidos_resync():
     """Empresas ativas com resync devido (por ultimo_resync_em + intervalo)."""
-    cutoff = timezone.now() - timedelta(hours=settings.DFE_RESYNC_INTERVALO_HORAS)
+    agora = timezone.now()
+    cutoff = agora - timedelta(hours=settings.DFE_RESYNC_INTERVALO_HORAS)
     return (
         DfeSyncState.objects
         .filter(empresa__ativa=True, resync_ativo=True)
         .filter(Q(ultimo_resync_em__isnull=True) | Q(ultimo_resync_em__lte=cutoff))
+        .filter(Q(proxima_captura_em__isnull=True) | Q(proxima_captura_em__lte=agora))
         .filter(_liberado_do_bloqueio())
         .filter(_livre_ou_orfao())
         .select_related('empresa')

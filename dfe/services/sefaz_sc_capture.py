@@ -669,11 +669,16 @@ def resync_sc_para_cnpj(cnpj: str):
             lote_xml = descompactar_lote(lote_dist_comp)
             persistir_lote(empresa, lote_xml)
         except Exception as exc:
+            minutos = (
+                RETRY_PERMANENTE_MIN
+                if isinstance(exc, PermissionError)
+                else RETRY_TRANSITORIO_MIN
+            )
             mensagem = f'Resync: falha ao salvar o lote: {exc}'
             state.ultimo_erro = mensagem
             state.ultimo_erro_em = timezone.now()
             state.proxima_captura_em = timezone.now() + timezone.timedelta(
-                minutes=RETRY_TRANSITORIO_MIN
+                minutes=minutos
             )
             state.save()
             return {
@@ -681,7 +686,7 @@ def resync_sc_para_cnpj(cnpj: str):
                 'tipo': 'resync',
                 'status': 'ERRO',
                 'erro': mensagem,
-                'erro_transitorio': True,
+                'erro_transitorio': minutos == RETRY_TRANSITORIO_MIN,
                 'nsu_original': nsu_original,
                 'resync_nsu_inicial': nsu_resync,
             }
