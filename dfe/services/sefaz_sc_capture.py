@@ -71,14 +71,26 @@ def _caminho_zip(empresa, emitido_em, chave: str = ''):
     return pasta, pasta / f'{mes:02d}.zip'
 
 
-def _entradas_existentes(arquivo_zip) -> set:
+def _entradas_existentes(arquivo_zip, tentativas=4) -> set:
     """Retorna o conjunto de nomes de entrada já presentes no ZIP, ou vazio se não existe."""
     import zipfile as _zf
-    try:
-        with _zf.ZipFile(arquivo_zip, 'r') as zf:
-            return set(zf.namelist())
-    except (FileNotFoundError, _zf.BadZipFile):
-        return set()
+    espera = 0.5
+    ultimo_erro = None
+    for tentativa in range(1, tentativas + 1):
+        try:
+            with _zf.ZipFile(arquivo_zip, 'r') as zf:
+                return set(zf.namelist())
+        except (FileNotFoundError, _zf.BadZipFile):
+            return set()
+        except OSError as exc:
+            ultimo_erro = exc
+            logger.warning(
+                'Falha ao ler entradas de %s (tentativa %d/%d): %s',
+                arquivo_zip, tentativa, tentativas, exc,
+            )
+            time.sleep(espera)
+            espera *= 2
+    raise ultimo_erro
 
 
 def _gravar_zip_com_retry(arquivo_zip, pasta, entradas, tentativas=4):
@@ -113,7 +125,7 @@ def _gravar_zip_sem_duplicata(arquivo_zip, pasta, entradas, tentativas=4):
     Garante idempotência: re-processar um lote após falha parcial do ZIP não
     cria entradas duplicadas no arquivo.
     """
-    existentes = _entradas_existentes(arquivo_zip)
+    existentes = _entradas_existentes(arquivo_zip, tentativas=tentativas)
     novas = [(nome, xml) for nome, xml in entradas if nome not in existentes]
     if novas:
         _gravar_zip_com_retry(arquivo_zip, pasta, novas, tentativas=tentativas)
@@ -653,8 +665,26 @@ def resync_sc_para_cnpj(cnpj: str):
     lote_dist_comp = extrair_texto(root, 'loteDistComp')
 
     if cstat == '118' and lote_dist_comp:
-        lote_xml = descompactar_lote(lote_dist_comp)
-        persistir_lote(empresa, lote_xml)
+        try:
+            lote_xml = descompactar_lote(lote_dist_comp)
+            persistir_lote(empresa, lote_xml)
+        except Exception as exc:
+            mensagem = f'Resync: falha ao salvar o lote: {exc}'
+            state.ultimo_erro = mensagem
+            state.ultimo_erro_em = timezone.now()
+            state.proxima_captura_em = timezone.now() + timezone.timedelta(
+                minutes=RETRY_TRANSITORIO_MIN
+            )
+            state.save()
+            return {
+                'cnpj': cnpj,
+                'tipo': 'resync',
+                'status': 'ERRO',
+                'erro': mensagem,
+                'erro_transitorio': True,
+                'nsu_original': nsu_original,
+                'resync_nsu_inicial': nsu_resync,
+            }
 
     if ult_nsu_ret:
         state.resync_nsu_inicial = int(ult_nsu_ret)

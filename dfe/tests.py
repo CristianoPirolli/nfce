@@ -1,11 +1,16 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from dfe.models import Empresa, DfeSetting, DfeSyncState
-from dfe.services.sefaz_sc_capture import _intervalo_proxima
+from dfe.services.sefaz_sc_capture import (
+    _entradas_existentes,
+    _intervalo_proxima,
+    resync_sc_para_cnpj,
+)
 from dfe.services.worker_fila import (
     liberar_claim,
     states_devidos_captura,
@@ -130,6 +135,80 @@ class AgendamentoFallbackTests(TestCase):
         self.assertEqual(_intervalo_proxima('999'), timedelta(hours=1))
         self.assertEqual(_intervalo_proxima(None), timedelta(hours=1))
         self.assertGreaterEqual(_intervalo_proxima('qualquer'), timedelta(hours=1))
+
+
+class ZipPersistenciaTests(TestCase):
+    def test_entradas_existentes_tenta_novamente_em_oserror(self):
+        chamadas = {'total': 0}
+
+        class FakeZip:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def namelist(self):
+                return ['nota.xml']
+
+        def abrir_zip(*args, **kwargs):
+            chamadas['total'] += 1
+            if chamadas['total'] == 1:
+                raise PermissionError('zip bloqueado')
+            return FakeZip()
+
+        with patch('zipfile.ZipFile', side_effect=abrir_zip), patch(
+            'dfe.services.sefaz_sc_capture.time.sleep'
+        ) as sleep:
+            self.assertEqual(_entradas_existentes('fake.zip', tentativas=2), {'nota.xml'})
+
+        self.assertEqual(chamadas['total'], 2)
+        sleep.assert_called_once()
+
+    def test_resync_registra_erro_de_persistencia(self):
+        empresa = _empresa(cnpj='30000000000001')
+        state = DfeSyncState.objects.create(
+            empresa=empresa,
+            ultimo_nsu_sc=9,
+            resync_nsu_inicial=7,
+        )
+        response_xml = b'''
+            <ret>
+                <cStat>118</cStat>
+                <xMotivo>DF-e localizados.</xMotivo>
+                <ultNuNSURet>123</ultNuNSURet>
+                <qtDfeRet>1</qtDfeRet>
+                <loteDistComp>abc</loteDistComp>
+            </ret>
+        '''
+
+        with patch(
+            'dfe.services.sefaz_sc_capture._resolver_cert',
+            return_value=('cert.pfx', 'senha', 'NFCE-DJANGO-1.0'),
+        ), patch(
+            'dfe.services.sefaz_sc_capture.build_xml_dist_nsu',
+            return_value='<xml/>',
+        ), patch(
+            'dfe.services.sefaz_sc_capture.enviar_requisicao',
+            return_value=response_xml,
+        ), patch(
+            'dfe.services.sefaz_sc_capture.descompactar_lote',
+            return_value=b'<lote/>',
+        ), patch(
+            'dfe.services.sefaz_sc_capture.persistir_lote',
+            side_effect=PermissionError('zip bloqueado'),
+        ):
+            resultado = resync_sc_para_cnpj(empresa.cnpj)
+
+        state.refresh_from_db()
+        self.assertEqual(resultado['status'], 'ERRO')
+        self.assertIn('falha ao salvar o lote', resultado['erro'])
+        self.assertTrue(resultado['erro_transitorio'])
+        self.assertEqual(state.ultimo_nsu_sc, 9)
+        self.assertEqual(state.resync_nsu_inicial, 7)
+        self.assertIn('falha ao salvar o lote', state.ultimo_erro)
+        self.assertIsNotNone(state.ultimo_erro_em)
+        self.assertIsNotNone(state.proxima_captura_em)
 
 
 class BotaoEnfileiraTests(TestCase):
