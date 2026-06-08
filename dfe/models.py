@@ -192,3 +192,57 @@ class CapturaHistorico(models.Model):
 
     def __str__(self):
         return f'{self.empresa.razao_social} - {self.inicio:%d/%m/%Y %H:%M}'
+
+
+class SefazScChamada(models.Model):
+    """Auditoria de cada tentativa de chamada ao webservice NFC-e SC."""
+    cnpj = models.CharField(max_length=14, db_index=True)
+    certificado = models.CharField(max_length=255, blank=True, default='')
+    ambiente = models.CharField(max_length=20, default='producao')
+    tipo_execucao = models.CharField(max_length=30, blank=True, default='')
+    filtro = models.CharField(max_length=80, blank=True, default='')
+    ult_nsu_enviado = models.BigIntegerField(null=True, blank=True)
+
+    cstat = models.CharField(max_length=10, blank=True, default='')
+    xmotivo = models.TextField(blank=True, default='')
+    ult_nsu_ret = models.BigIntegerField(null=True, blank=True)
+    qt_dfe_ret = models.IntegerField(null=True, blank=True)
+    http_status = models.IntegerField(null=True, blank=True)
+    tempo_resposta_ms = models.IntegerField(null=True, blank=True)
+    erro_tecnico = models.TextField(blank=True, default='')
+
+    request_path = models.CharField(max_length=500, blank=True, default='')
+    response_path = models.CharField(max_length=500, blank=True, default='')
+    tentativa = models.IntegerField(default=1)
+    criado_em = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-criado_em']
+        indexes = [
+            models.Index(fields=['cnpj', '-criado_em']),
+            models.Index(fields=['cstat', '-criado_em']),
+        ]
+
+    def __str__(self):
+        return f'{self.cnpj} {self.cstat or "-"} {self.criado_em:%d/%m/%Y %H:%M:%S}'
+
+
+class DfeExecucaoLock(models.Model):
+    """Lock lógico para impedir chamadas concorrentes ao mesmo CNPJ/certificado."""
+    cnpj = models.CharField(max_length=14)
+    tipo_execucao = models.CharField(max_length=30)
+    certificado = models.CharField(max_length=255)
+    filtro = models.CharField(max_length=80, blank=True, default='')
+    worker_id = models.CharField(max_length=120, blank=True, default='')
+    criado_em = models.DateTimeField(auto_now_add=True)
+    expira_em = models.DateTimeField(db_index=True)
+
+    class Meta:
+        unique_together = ('cnpj', 'tipo_execucao', 'certificado', 'filtro')
+        indexes = [
+            models.Index(fields=['cnpj', 'tipo_execucao']),
+            models.Index(fields=['expira_em']),
+        ]
+
+    def __str__(self):
+        return f'{self.cnpj} {self.tipo_execucao} {self.filtro}'

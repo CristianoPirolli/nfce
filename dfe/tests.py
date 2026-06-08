@@ -9,6 +9,7 @@ from dfe.models import Empresa, DfeSetting, DfeSyncState
 from dfe.services.sefaz_sc_capture import (
     _entradas_existentes,
     _intervalo_proxima,
+    capturar_sc_para_cnpj,
     resync_sc_para_cnpj,
 )
 from dfe.services.worker_fila import (
@@ -154,6 +155,65 @@ class AgendamentoFallbackTests(TestCase):
         self.assertEqual(_intervalo_proxima(None), timedelta(hours=1))
         self.assertGreaterEqual(_intervalo_proxima('qualquer'), timedelta(hours=1))
 
+    def test_captura_118_sem_lote_nao_avanca_nsu(self):
+        empresa = _empresa(cnpj='21000000000001')
+        state = DfeSyncState.objects.create(empresa=empresa, ultimo_nsu_sc=10)
+        response_xml = b'''
+            <ret>
+                <cStat>118</cStat>
+                <xMotivo>DF-e localizados.</xMotivo>
+                <ultNuNSURet>123</ultNuNSURet>
+                <qtDfeRet>1</qtDfeRet>
+            </ret>
+        '''
+
+        with patch(
+            'dfe.services.sefaz_sc_capture._resolver_cert',
+            return_value=('cert.pfx', 'senha', 'NFCE-DJANGO-1.0'),
+        ), patch(
+            'dfe.services.sefaz_sc_capture.build_xml_dist_nsu',
+            return_value=b'<xml/>',
+        ), patch(
+            'dfe.services.sefaz_sc_capture.enviar_requisicao',
+            return_value=response_xml,
+        ):
+            resultado = capturar_sc_para_cnpj(empresa.cnpj)
+
+        state.refresh_from_db()
+        self.assertEqual(resultado['parou_por'], 'resposta_118_sem_lote')
+        self.assertEqual(state.ultimo_nsu_sc, 10)
+        self.assertIn('118 sem loteDistComp', state.ultimo_erro)
+
+    def test_captura_657_bloqueia_por_12h(self):
+        empresa = _empresa(cnpj='21000000000002')
+        state = DfeSyncState.objects.create(empresa=empresa, ultimo_nsu_sc=10)
+        antes = timezone.now()
+        response_xml = b'''
+            <ret>
+                <cStat>657</cStat>
+                <xMotivo>Consumo indevido.</xMotivo>
+                <ultNuNSURet>10</ultNuNSURet>
+                <qtDfeRet>0</qtDfeRet>
+            </ret>
+        '''
+
+        with patch(
+            'dfe.services.sefaz_sc_capture._resolver_cert',
+            return_value=('cert.pfx', 'senha', 'NFCE-DJANGO-1.0'),
+        ), patch(
+            'dfe.services.sefaz_sc_capture.build_xml_dist_nsu',
+            return_value=b'<xml/>',
+        ), patch(
+            'dfe.services.sefaz_sc_capture.enviar_requisicao',
+            return_value=response_xml,
+        ):
+            resultado = capturar_sc_para_cnpj(empresa.cnpj)
+
+        state.refresh_from_db()
+        self.assertEqual(resultado['parou_por'], 'bloqueado_657')
+        self.assertGreaterEqual(state.bloqueado_ate, antes + timedelta(hours=11, minutes=59))
+        self.assertEqual(state.proxima_captura_em, state.bloqueado_ate)
+
 
 class ZipPersistenciaTests(TestCase):
     def test_entradas_existentes_tenta_novamente_em_oserror(self):
@@ -228,6 +288,40 @@ class ZipPersistenciaTests(TestCase):
         self.assertIsNotNone(state.ultimo_erro_em)
         self.assertIsNotNone(state.proxima_captura_em)
         self.assertGreater(state.proxima_captura_em, timezone.now() + timedelta(minutes=55))
+
+    def test_resync_118_sem_lote_nao_avanca_nsu(self):
+        empresa = _empresa(cnpj='30000000000002')
+        state = DfeSyncState.objects.create(
+            empresa=empresa,
+            ultimo_nsu_sc=9,
+            resync_nsu_inicial=7,
+        )
+        response_xml = b'''
+            <ret>
+                <cStat>118</cStat>
+                <xMotivo>DF-e localizados.</xMotivo>
+                <ultNuNSURet>123</ultNuNSURet>
+                <qtDfeRet>1</qtDfeRet>
+            </ret>
+        '''
+
+        with patch(
+            'dfe.services.sefaz_sc_capture._resolver_cert',
+            return_value=('cert.pfx', 'senha', 'NFCE-DJANGO-1.0'),
+        ), patch(
+            'dfe.services.sefaz_sc_capture.build_xml_dist_nsu',
+            return_value=b'<xml/>',
+        ), patch(
+            'dfe.services.sefaz_sc_capture.enviar_requisicao',
+            return_value=response_xml,
+        ):
+            resultado = resync_sc_para_cnpj(empresa.cnpj)
+
+        state.refresh_from_db()
+        self.assertEqual(resultado['status'], 'ERRO')
+        self.assertIn('118 sem loteDistComp', resultado['erro'])
+        self.assertEqual(state.ultimo_nsu_sc, 9)
+        self.assertEqual(state.resync_nsu_inicial, 7)
 
 
 class BotaoEnfileiraTests(TestCase):

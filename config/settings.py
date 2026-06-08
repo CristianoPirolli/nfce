@@ -167,3 +167,4 @@ DFE_CLAIM_ORFAO_MIN = _env_int('DFE_CLAIM_ORFAO_MIN', 30)
 # consulta válida (ultima_captura) foi há menos que isto — rede de proteção
 # extra contra consumo indevido, independente do agendamento normal.
 DFE_MIN_INTERVALO_CAPTURA_MIN = _env_int('DFE_MIN_INTERVALO_CAPTURA_MIN', 30)
+DFE_LOCK_TTL_MIN = _env_int('DFE_LOCK_TTL_MIN', 30)

@@ -178,6 +178,7 @@ from dfe.services.sefaz_sc_distribuicao_client import (
     SefazPermanenteError,
     SefazTransitorioError,
 )
+from dfe.services.sefaz_lock import DfeLockError, sefaz_execucao_lock
 
 
 # Re-tentativa após falha de comunicação.
@@ -255,6 +256,21 @@ def _resolver_cert(empresa: Empresa):
     )
 
 
+def _identificador_certificado(empresa: Empresa, cert_path: str) -> str:
+    if empresa.cert_pfx and cert_path == empresa.cert_pfx.path:
+        return f'empresa:{empresa.cnpj}'
+
+    setting = DfeSetting.objects.first()
+    if setting and setting.cert_pfx and cert_path == setting.cert_pfx.path:
+        cnpj = setting.nfce_sc_cert_cnpj_contador or 'sem-cnpj'
+        return f'contador:{cnpj}'
+    if setting and setting.cert_path and cert_path == setting.cert_path:
+        cnpj = setting.nfce_sc_cert_cnpj_contador or 'legado'
+        return f'contador:{cnpj}'
+
+    return f'cert:{cert_path}'
+
+
 MAX_LOTES_POR_CAPTURA = 200  # teto de segurança (200 * 50 = 10.000 docs)
 
 
@@ -273,6 +289,7 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
     # não decriptável) — trata como permanente, registra e sai sem chamar o WS.
     try:
         cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
+        cert_identificador = _identificador_certificado(empresa, cert_path)
     except Exception as exc:
         res = _finalizar_com_erro(
             state, cnpj, str(exc), transitorio=False,
@@ -307,12 +324,19 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
         # Comunicação + parsing da resposta. Falhas aqui param a captura
         # graciosamente, preservando o NSU já avançado nas iterações anteriores.
         try:
-            response_xml = enviar_requisicao(
-                xml_dist=xml_dist,
-                cert_pfx_path=cert_path,
-                cert_password=cert_password,
-            )
+            with sefaz_execucao_lock(empresa.cnpj, 'sefaz_sc_nfce', cert_identificador, 'nfce'):
+                response_xml = enviar_requisicao(
+                    xml_dist=xml_dist,
+                    cert_pfx_path=cert_path,
+                    cert_password=cert_password,
+                    cert_identificador=cert_identificador,
+                    tipo_execucao='captura',
+                )
             root = _safe_fromstring(response_xml)
+        except DfeLockError as exc:
+            erro, erro_transitorio = str(exc), True
+            parou_por = 'lock_concorrente'
+            break
         except SefazPermanenteError as exc:
             erro, erro_transitorio = str(exc), False
             parou_por = 'erro_permanente'
@@ -349,12 +373,14 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
         state.ultimo_motivo = xmotivo
         state.ultima_captura = timezone.now()
 
-        if ult_nsu_ret:
-            state.ultimo_nsu_sc = int(ult_nsu_ret)
-
         # Persistência do lote: erro de gravação aqui é tratado como transitório
         # (lock SMB, disco) e não deve avançar o NSU sem ter salvo os documentos.
-        if cstat == '118' and lote_dist_comp:
+        if cstat == '118':
+            if not lote_dist_comp:
+                erro = f'Resposta 118 sem loteDistComp (NSU {nsu_antes}).'
+                erro_transitorio = True
+                parou_por = 'resposta_118_sem_lote'
+                break
             try:
                 lote_xml = descompactar_lote(lote_dist_comp)
                 res_lote = persistir_lote(empresa, lote_xml)
@@ -368,6 +394,9 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
                 parou_por = 'erro_persistencia'
                 break
 
+        if ult_nsu_ret:
+            state.ultimo_nsu_sc = int(ult_nsu_ret)
+
         lotes.append({
             'iteracao': i + 1,
             'cstat': cstat,
@@ -380,7 +409,7 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
 
         # Bloqueio / throttle do WS — para imediatamente e agenda re-tentativa.
         if cstat == '657':
-            state.bloqueado_ate = timezone.now() + timezone.timedelta(hours=1)
+            state.bloqueado_ate = timezone.now() + timezone.timedelta(hours=12)
             state.proxima_captura_em = state.bloqueado_ate
             parou_por = 'bloqueado_657'
             break
@@ -435,7 +464,10 @@ def capturar_sc_para_cnpj(cnpj: str, max_lotes: int = MAX_LOTES_POR_CAPTURA):
     # e seja re-consultado a cada ciclo do worker.
     state.ultimo_erro = ''
     state.ultimo_erro_em = None
-    state.proxima_captura_em = timezone.now() + _intervalo_proxima(ultimo_cstat)
+    if ultimo_cstat == '657' and state.bloqueado_ate:
+        state.proxima_captura_em = state.bloqueado_ate
+    else:
+        state.proxima_captura_em = timezone.now() + _intervalo_proxima(ultimo_cstat)
 
     state.save()
 
@@ -615,6 +647,7 @@ def extrair_chave_do_xml(xml: str):
 def resync_sc_para_cnpj(cnpj: str):
     empresa = Empresa.objects.get(cnpj=cnpj)
     cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
+    cert_identificador = _identificador_certificado(empresa, cert_path)
 
     state, _ = DfeSyncState.objects.get_or_create(empresa=empresa)
 
@@ -635,13 +668,16 @@ def resync_sc_para_cnpj(cnpj: str):
     )
 
     try:
-        response_xml = enviar_requisicao(
-            xml_dist=xml_dist,
-            cert_pfx_path=cert_path,
-            cert_password=cert_password,
-        )
+        with sefaz_execucao_lock(empresa.cnpj, 'sefaz_sc_nfce', cert_identificador, 'nfce'):
+            response_xml = enviar_requisicao(
+                xml_dist=xml_dist,
+                cert_pfx_path=cert_path,
+                cert_password=cert_password,
+                cert_identificador=cert_identificador,
+                tipo_execucao='resync',
+            )
         root = _safe_fromstring(response_xml)
-    except (SefazError, etree.XMLSyntaxError) as exc:
+    except (SefazError, etree.XMLSyntaxError, DfeLockError) as exc:
         transitorio = not isinstance(exc, SefazPermanenteError)
         minutos = RETRY_TRANSITORIO_MIN if transitorio else RETRY_PERMANENTE_MIN
         state.ultimo_erro = f'Resync: {exc}'
@@ -664,7 +700,24 @@ def resync_sc_para_cnpj(cnpj: str):
     qt_dfe_ret = extrair_texto(root, 'qtDfeRet')
     lote_dist_comp = extrair_texto(root, 'loteDistComp')
 
-    if cstat == '118' and lote_dist_comp:
+    if cstat == '118':
+        if not lote_dist_comp:
+            mensagem = f'Resync: resposta 118 sem loteDistComp (NSU {nsu_resync}).'
+            state.ultimo_erro = mensagem
+            state.ultimo_erro_em = timezone.now()
+            state.proxima_captura_em = timezone.now() + timezone.timedelta(
+                minutes=RETRY_TRANSITORIO_MIN
+            )
+            state.save()
+            return {
+                'cnpj': cnpj,
+                'tipo': 'resync',
+                'status': 'ERRO',
+                'erro': mensagem,
+                'erro_transitorio': True,
+                'nsu_original': nsu_original,
+                'resync_nsu_inicial': nsu_resync,
+            }
         try:
             lote_xml = descompactar_lote(lote_dist_comp)
             persistir_lote(empresa, lote_xml)
@@ -712,7 +765,7 @@ def resync_sc_para_cnpj(cnpj: str):
         state.proxima_captura_em = timezone.now() + timezone.timedelta(hours=1)
 
     elif cstat == '657':
-        state.bloqueado_ate = timezone.now() + timezone.timedelta(hours=1)
+        state.bloqueado_ate = timezone.now() + timezone.timedelta(hours=12)
         state.proxima_captura_em = state.bloqueado_ate
 
     state.save()
@@ -772,6 +825,7 @@ def verificar_cancelamentos_sc_pendentes():
 def consultar_documento_por_chave(cnpj: str, chave_acesso: str):
     empresa = Empresa.objects.get(cnpj=cnpj)
     cert_path, cert_password, ver_aplic = _resolver_cert(empresa)
+    cert_identificador = _identificador_certificado(empresa, cert_path)
 
     xml_dist = build_xml_sol_dfe(
         cnpj=cnpj,
@@ -779,11 +833,14 @@ def consultar_documento_por_chave(cnpj: str, chave_acesso: str):
         ver_aplic=ver_aplic,
     )
 
-    response_xml = enviar_requisicao(
-        xml_dist=xml_dist,
-        cert_pfx_path=cert_path,
-        cert_password=cert_password,
-    )
+    with sefaz_execucao_lock(empresa.cnpj, 'sefaz_sc_nfce', cert_identificador, 'nfce'):
+        response_xml = enviar_requisicao(
+            xml_dist=xml_dist,
+            cert_pfx_path=cert_path,
+            cert_password=cert_password,
+            cert_identificador=cert_identificador,
+            tipo_execucao='cancelamento',
+        )
 
     root = _safe_fromstring(response_xml)
 
