@@ -121,7 +121,8 @@ USE_TZ = True
 
 
 # === Estáticos ===
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
 # === Certificados ===

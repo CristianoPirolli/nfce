@@ -18,6 +18,74 @@
     <a href="{% url 'dfe:historico_capturas' %}" class="btn btn-secondary">Limpar</a>
 </form>
 
+<div class="dropdown-capturas" style="position:relative; display:inline-block; margin-bottom:16px;">
+    <button type="button" class="btn btn-secondary">
+        Proximas capturas automaticas
+        <span class="badge badge-info" style="margin-left:6px;">{{ worker_ciclo_segundos }}s</span>
+    </button>
+    <div class="dropdown-capturas-menu">
+        {% for item in proximas_capturas %}
+            <div class="dropdown-capturas-item">
+                <strong>{{ item.empresa.razao_social }}</strong>
+                <span>
+                    {% if item.em_execucao %}
+                        Capturando agora
+                    {% elif item.proxima_em <= now %}
+                        Na fila
+                    {% else %}
+                        {{ item.proxima_em|date:"d/m/Y H:i:s" }}
+                    {% endif %}
+                </span>
+            </div>
+        {% empty %}
+            <div class="dropdown-capturas-vazio">Nenhuma captura automatica agendada.</div>
+        {% endfor %}
+    </div>
+</div>
+
+<style>
+    .dropdown-capturas-menu {
+        display: none;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        min-width: 360px;
+        margin-top: 6px;
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 6px;
+        box-shadow: 0 10px 24px rgba(0,0,0,.12);
+        z-index: 20;
+        overflow: hidden;
+    }
+    .dropdown-capturas:hover .dropdown-capturas-menu { display: block; }
+    .dropdown-capturas-item {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #f3f4f6;
+        font-size: 13px;
+    }
+    .dropdown-capturas-item:last-child { border-bottom: 0; }
+    .dropdown-capturas-item strong {
+        max-width: 210px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .dropdown-capturas-item span {
+        color: #6b7280;
+        white-space: nowrap;
+    }
+    .dropdown-capturas-vazio {
+        padding: 12px;
+        color: #6b7280;
+        font-size: 13px;
+        white-space: nowrap;
+    }
+</style>
+
 <table>
     <thead>
         <tr>

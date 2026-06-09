@@ -28,6 +28,9 @@
             {% endif %}
         {% endif %}
     </div>
+    <div class="actions" style="align-items:flex-start;">
+        <a href="{% url 'dfe:consulta_index' %}" class="btn btn-secondary btn-sm">← Voltar</a>
+    </div>
     {% if captura_liberada_em %}
     <span class="captura-wrap" data-liberada-em="{{ captura_liberada_em|date:'c' }}">
         <button type="button" class="btn btn-primary" disabled>⟳ Capturar agora</button>

@@ -13,6 +13,24 @@
 </div>
 <p style="color:#6b7280; margin-bottom:24px;">Selecione uma empresa para visualizar e capturar documentos.</p>
 
+<form method="get" class="filters" style="align-items:flex-end;">
+    <div style="flex:1; min-width:260px;">
+        <label for="busca-empresa">Pesquisar por empresa</label>
+        <input
+            id="busca-empresa"
+            type="text"
+            name="q"
+            value="{{ busca }}"
+            placeholder="Razao social ou CNPJ"
+            autocomplete="off"
+        >
+    </div>
+    <button type="submit" class="btn btn-primary">Pesquisar</button>
+    {% if busca %}
+        <a href="{% url 'dfe:consulta_index' %}" class="btn btn-secondary">Limpar</a>
+    {% endif %}
+</form>
+
 <table>
     <thead>
         <tr>
@@ -26,8 +44,8 @@
     <tbody>
     {% for empresa in empresas %}
         <tr data-empresa-id="{{ empresa.id }}">
-            <td>{{ empresa.razao_social }}</td>
-            <td>{{ empresa.cnpj }}</td>
+            <td data-empresa-razao>{{ empresa.razao_social }}</td>
+            <td data-empresa-cnpj>{{ empresa.cnpj }}</td>
             <td>
                 {% if empresa.cert_ok %}
                     <span class="badge badge-ok">OK</span>
@@ -43,8 +61,19 @@
             <td><a class="btn btn-primary btn-sm" href="{% url 'dfe:consulta_empresa' empresa.id %}">Abrir</a></td>
         </tr>
     {% empty %}
-        <tr><td colspan="5" style="text-align:center; padding:24px;">Nenhuma empresa ativa.</td></tr>
+        <tr>
+            <td colspan="5" style="text-align:center; padding:24px;">
+                {% if busca %}
+                    Nenhuma empresa encontrada para "{{ busca }}".
+                {% else %}
+                    Nenhuma empresa ativa.
+                {% endif %}
+            </td>
+        </tr>
     {% endfor %}
+        <tr data-sem-resultados style="display:none;">
+            <td colspan="5" style="text-align:center; padding:24px;">Nenhuma empresa encontrada.</td>
+        </tr>
     </tbody>
 </table>
 
@@ -60,6 +89,35 @@
         em_dia: 'badge-ok',
         novo: 'badge-info'
     };
+    var campoBusca = document.getElementById('busca-empresa');
+    var linhaSemResultados = document.querySelector('[data-sem-resultados]');
+
+    function normalizar(texto) {
+        return (texto || '')
+            .toString()
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    function filtrarEmpresas() {
+        if (!campoBusca) return;
+        var termo = normalizar(campoBusca.value);
+        var linhas = document.querySelectorAll('tr[data-empresa-id]');
+        var visiveis = 0;
+
+        linhas.forEach(function (row) {
+            var razao = normalizar(row.querySelector('[data-empresa-razao]').textContent);
+            var cnpj = normalizar(row.querySelector('[data-empresa-cnpj]').textContent);
+            var encontrou = !termo || razao.indexOf(termo) !== -1 || cnpj.indexOf(termo) !== -1;
+            row.style.display = encontrou ? '' : 'none';
+            if (encontrou) visiveis += 1;
+        });
+
+        if (linhaSemResultados) {
+            linhaSemResultados.style.display = visiveis === 0 && termo ? '' : 'none';
+        }
+    }
 
     function atualizar(data) {
         var gv = document.querySelector('[data-global-vigentes]');
@@ -87,6 +145,11 @@
     }
 
     setInterval(tick, INTERVALO_MS);
+
+    if (campoBusca) {
+        campoBusca.addEventListener('input', filtrarEmpresas);
+        filtrarEmpresas();
+    }
 })();
 </script>
 {% endblock %}

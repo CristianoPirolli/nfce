@@ -2,6 +2,7 @@ import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import Paginator
 from django.http import Http404, HttpResponse, JsonResponse
@@ -70,7 +71,7 @@ _SAFE_XML_PARSER = etree.XMLParser(
 
 from django.db.models import Count, Q
 from .forms import CertificadoContadorForm, CertificadoUploadForm, EmpresaForm
-from .models import DfeSetting, Empresa, NfceDocumento, CapturaHistorico
+from .models import DfeSetting, Empresa, NfceDocumento, CapturaHistorico, DfeSyncState
 
 
 def _contador_cert_configurado() -> bool:
@@ -237,10 +238,17 @@ def _resumo_nfce(doc: NfceDocumento) -> dict:
 
 
 def consulta_index(request):
-    empresas = list(
+    busca = request.GET.get('q', '').strip()
+    empresas_qs = (
         Empresa.objects.filter(ativa=True)
         .select_related('dfesyncstate')
-        .order_by('razao_social')
+    )
+    if busca:
+        empresas_qs = empresas_qs.filter(
+            Q(razao_social__icontains=busca) | Q(cnpj__icontains=busca)
+        )
+    empresas = list(
+        empresas_qs.order_by('razao_social')
     )
     
     # Totais globais (todas as empresas ativas)
@@ -261,7 +269,8 @@ def consulta_index(request):
     
     return render(request, 'dfe/consulta/index.html', {
         'empresas': empresas,
-        'global_stats': global_stats
+        'global_stats': global_stats,
+        'busca': busca,
     })
 
 
@@ -323,8 +332,33 @@ def status_empresa_json(request, empresa_id):
 
 def historico_capturas(request):
     """Exibe o histórico de todas as execuções de captura das últimas 24 horas."""
-    limite = timezone.now() - timedelta(hours=24)
+    agora = timezone.now()
+    limite = agora - timedelta(hours=24)
     qs = CapturaHistorico.objects.filter(inicio__gte=limite).select_related('empresa').order_by('-inicio')
+    proximas_capturas = []
+    piso_minimo = timedelta(minutes=settings.DFE_MIN_INTERVALO_CAPTURA_MIN)
+    states = (
+        DfeSyncState.objects
+        .filter(empresa__ativa=True)
+        .select_related('empresa')
+    )
+    for state in states:
+        candidatos = []
+        if state.proxima_captura_em:
+            candidatos.append(state.proxima_captura_em)
+        if state.bloqueado_ate and state.bloqueado_ate > agora:
+            candidatos.append(state.bloqueado_ate)
+        if state.ultima_captura:
+            candidatos.append(state.ultima_captura + piso_minimo)
+        proxima_em = max(candidatos) if candidatos else agora
+        proximas_capturas.append({
+            'empresa': state.empresa,
+            'proxima_em': proxima_em,
+            'em_execucao': state.em_execucao,
+            'worker_id': state.worker_id,
+            'status': _status_captura(state),
+        })
+    proximas_capturas.sort(key=lambda item: (item['proxima_em'], item['empresa'].razao_social))
     
     empresa_nome = request.GET.get('empresa', '').strip()
     if empresa_nome:
@@ -336,6 +370,9 @@ def historico_capturas(request):
     return render(request, 'dfe/consulta/historico.html', {
         'page': page,
         'empresa_nome': empresa_nome,
+        'proximas_capturas': proximas_capturas[:5],
+        'worker_ciclo_segundos': settings.DFE_WORKER_CICLO_SEGUNDOS,
+        'now': agora,
     })
 
 
