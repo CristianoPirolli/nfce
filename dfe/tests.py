@@ -4,6 +4,7 @@ from unittest.mock import patch
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
+from requests import exceptions as req_exc
 
 from dfe.models import Empresa, DfeSetting, DfeSyncState
 from dfe.services.sefaz_sc_capture import (
@@ -11,6 +12,10 @@ from dfe.services.sefaz_sc_capture import (
     _intervalo_proxima,
     capturar_sc_para_cnpj,
     resync_sc_para_cnpj,
+)
+from dfe.services.sefaz_sc_distribuicao_client import (
+    SefazTransitorioError,
+    enviar_requisicao,
 )
 from dfe.services.worker_fila import (
     liberar_claim,
@@ -322,6 +327,50 @@ class ZipPersistenciaTests(TestCase):
         self.assertIn('118 sem loteDistComp', resultado['erro'])
         self.assertEqual(state.ultimo_nsu_sc, 9)
         self.assertEqual(state.resync_nsu_inicial, 7)
+
+
+class _FakeResponse:
+    def __init__(self, status_code=200, content=b'<ok/>'):
+        self.status_code = status_code
+        self.content = content
+
+
+class EnviarRequisicaoSslTests(TestCase):
+    """Erro de SSL deve ser re-tentado: o balanceador da SEFAZ-SC já serviu
+    certificado expirado em parte dos nós (06/2026), tornando a falha
+    intermitente — outra tentativa pode cair num nó com certificado válido."""
+
+    def _enviar(self, side_effect):
+        with patch(
+            'dfe.services.sefaz_sc_distribuicao_client.post',
+            side_effect=side_effect,
+        ) as post, patch(
+            'dfe.services.sefaz_sc_distribuicao_client._registrar_chamada'
+        ), patch(
+            'dfe.services.sefaz_sc_distribuicao_client._gravar_debug'
+        ), patch(
+            'dfe.services.sefaz_sc_distribuicao_client.time.sleep'
+        ):
+            resultado = enviar_requisicao(
+                xml_dist=b'<xml/>',
+                cert_pfx_path='cert.pfx',
+                cert_password='senha',
+            )
+        return resultado, post
+
+    def test_ssl_error_retenta_e_sucede_no_no_sadio(self):
+        respostas = [
+            req_exc.SSLError('certificate has expired'),
+            _FakeResponse(),
+        ]
+        resultado, post = self._enviar(respostas)
+        self.assertEqual(resultado, b'<ok/>')
+        self.assertEqual(post.call_count, 2)
+
+    def test_ssl_error_persistente_vira_transitorio(self):
+        with self.assertRaises(SefazTransitorioError) as ctx:
+            self._enviar(req_exc.SSLError('certificate has expired'))
+        self.assertIn('SSL', str(ctx.exception))
 
 
 class BotaoEnfileiraTests(TestCase):

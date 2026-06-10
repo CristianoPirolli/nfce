@@ -24,11 +24,11 @@ class SefazError(Exception):
 
 
 class SefazTransitorioError(SefazError):
-    """Falha provavelmente temporária (timeout, conexão, HTTP 5xx). Vale re-tentar."""
+    """Falha provavelmente temporária (timeout, conexão, SSL, HTTP 5xx). Vale re-tentar."""
 
 
 class SefazPermanenteError(SefazError):
-    """Falha que não deve ser re-tentada automaticamente (HTTP 4xx, SSL, payload)."""
+    """Falha que não deve ser re-tentada automaticamente (HTTP 4xx, payload)."""
 
 
 def build_xml_dist_nsu(cnpj: str, ult_nsu: int, ver_aplic: str = 'NFCE-DJANGO-1.0') -> bytes:
@@ -235,7 +235,7 @@ def enviar_requisicao(
     """Envia o SOAP à SEFAZ-SC com retry/backoff em falhas transitórias.
 
     Levanta:
-      - SefazPermanenteError: falha que não vale re-tentar (HTTP 4xx, SSL).
+      - SefazPermanenteError: falha que não vale re-tentar (HTTP 4xx).
       - SefazTransitorioError: falha transitória após esgotar as tentativas.
     """
     soap = build_soap_envelope(xml_dist)
@@ -270,10 +270,12 @@ def enviar_requisicao(
                 tempo_resposta_ms=tempo_ms,
                 erro_tecnico=f'Erro de SSL/certificado: {exc}',
             )
-            # Problema de certificado/handshake — não adianta re-tentar.
-            raise SefazPermanenteError(
+            # O balanceador da SEFAZ-SC já serviu certificado expirado em
+            # parte dos nós (06/2026): a falha é intermitente e outra
+            # tentativa pode cair num nó com certificado válido.
+            ultimo_erro = SefazTransitorioError(
                 f'Erro de SSL/certificado na conexão com a SEFAZ-SC: {exc}'
-            ) from exc
+            )
         except (req_exc.ConnectionError, req_exc.Timeout) as exc:
             tempo_ms = int((time.monotonic() - inicio) * 1000)
             _registrar_chamada(
